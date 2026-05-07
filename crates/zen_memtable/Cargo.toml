@@ -1,0 +1,31 @@
+[package]
+name = "zen_memtable"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+zen_common = { workspace = true }
+zen_index = { workspace = true }
+zen_wal = { workspace = true }
+zen_format = { workspace = true }
+arrow = { workspace = true }
+arrow-array = { workspace = true }
+arrow-schema = { workspace = true }
+roaring = { workspace = true }
+tokio = { workspace = true }
+async-trait = { workspace = true }
+parking_lot = "0.12"
+bytes = { workspace = true }
+serde_json = { workspace = true }
+tracing = { workspace = true }
+thiserror = { workspace = true }
+
+[dev-dependencies]
+criterion = { workspace = true }
+tempfile = { workspace = true }
+
+[[bench]]
+name = "memtable_bench"
+harness = false

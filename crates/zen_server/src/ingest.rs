@@ -1,0 +1,202 @@
+//! Ingest endpoint.
+
+use axum::{extract::State, http::StatusCode, Json};
+use serde::{Deserialize, Serialize};
+
+use zen_catalog::model::WalObjectRow;
+use zen_common::{
+    CommitId, PartitionId, Schema, SpanId, SpanRecord, TenantId, TraceId,
+};
+use zen_memtable::flush_to_record_batch;
+use zen_wal::WalWriter;
+
+use crate::state::ServerState;
+
+#[derive(Clone, Debug, Deserialize)]
+pub struct IngestRequest {
+    pub tenant_id: u64,
+    #[serde(default)]
+    pub partition_id: u32,
+    pub spans: Vec<SpanIn>,
+}
+
+#[derive(Clone, Debug, Deserialize)]
+pub struct SpanIn {
+    #[serde(default)]
+    pub trace_id: Option<String>,
+    #[serde(default)]
+    pub span_id: Option<String>,
+    #[serde(default)]
+    pub parent_span_id: Option<String>,
+    pub start_time_ms: i64,
+    pub end_time_ms: i64,
+    #[serde(default)]
+    pub duration_ms: Option<i64>,
+    #[serde(default)]
+    pub span_type: Option<String>,
+    #[serde(default)]
+    pub status: Option<String>,
+    #[serde(default)]
+    pub provider: Option<String>,
+    #[serde(default)]
+    pub model: Option<String>,
+    #[serde(default)]
+    pub tool_name: Option<String>,
+    #[serde(default)]
+    pub prompt: Option<String>,
+    #[serde(default)]
+    pub completion: Option<String>,
+    #[serde(default)]
+    pub prompt_tokens: Option<u32>,
+    #[serde(default)]
+    pub completion_tokens: Option<u32>,
+    #[serde(default)]
+    pub cost_usd: Option<f64>,
+    #[serde(default)]
+    pub temperature: Option<f64>,
+    #[serde(default)]
+    pub top_p: Option<f64>,
+    #[serde(default)]
+    pub tool_io_text: Option<String>,
+    #[serde(default)]
+    pub user_id: Option<String>,
+    #[serde(default)]
+    pub session_id: Option<String>,
+    #[serde(default)]
+    pub request_id: Option<String>,
+    #[serde(default)]
+    pub metadata: Option<serde_json::Value>,
+    #[serde(default)]
+    pub embedding: Option<Vec<f32>>,
+}
+
+#[derive(Clone, Debug, Serialize)]
+pub struct IngestResponse {
+    pub spans_accepted: u32,
+    pub wal_object_key: String,
+}
+
+pub async fn handle_ingest(
+    State(state): State<ServerState>,
+    Json(req): Json<IngestRequest>,
+) -> Result<Json<IngestResponse>, (StatusCode, String)> {
+    let tenant = TenantId(req.tenant_id);
+    let partition = PartitionId(req.partition_id);
+    state
+        .catalog
+        .ensure_tenant(tenant, "")
+        .await
+        .map_err(http_err)?;
+    state
+        .catalog
+        .ensure_partition(tenant, partition)
+        .await
+        .map_err(http_err)?;
+
+    let n = req.spans.len();
+
+    // Convert to SpanRecord and assign commit_ids.
+    let commit_id = state
+        .catalog
+        .next_commit_id(tenant, partition)
+        .await
+        .map_err(http_err)?;
+
+    let records: Vec<SpanRecord> = req
+        .spans
+        .into_iter()
+        .enumerate()
+        .map(|(i, s)| {
+            let trace_id = s
+                .trace_id
+                .as_deref()
+                .and_then(|s| s.parse::<TraceId>().ok())
+                .unwrap_or_else(TraceId::new_random);
+            let span_id = s
+                .span_id
+                .as_deref()
+                .and_then(|s| s.parse::<SpanId>().ok())
+                .unwrap_or_else(SpanId::new_random);
+            let parent_span_id = s
+                .parent_span_id
+                .as_deref()
+                .and_then(|s| s.parse::<SpanId>().ok());
+            SpanRecord {
+                tenant_id: tenant,
+                partition_id: partition,
+                trace_id,
+                span_id,
+                parent_span_id,
+                start_time_ms: s.start_time_ms,
+                end_time_ms: s.end_time_ms,
+                duration_ms: s
+                    .duration_ms
+                    .unwrap_or(s.end_time_ms.saturating_sub(s.start_time_ms)),
+                span_type: s.span_type,
+                status: s.status,
+                provider: s.provider,
+                model: s.model,
+                tool_name: s.tool_name,
+                prompt: s.prompt,
+                completion: s.completion,
+                prompt_tokens: s.prompt_tokens,
+                completion_tokens: s.completion_tokens,
+                cost_usd: s.cost_usd,
+                temperature: s.temperature,
+                top_p: s.top_p,
+                tool_io_text: s.tool_io_text,
+                user_id: s.user_id,
+                session_id: s.session_id,
+                request_id: s.request_id,
+                metadata: s.metadata,
+                embedding: s.embedding,
+                commit_id: CommitId(commit_id.0 + i as u64),
+            }
+        })
+        .collect();
+
+    // Append to memtable.
+    let mt = state.memtable_for(tenant, partition);
+    mt.append_many(records);
+
+    // Synchronously flush to WAL.
+    let batch = mt.flush().map_err(http_err)?;
+    let writer = WalWriter::new(state.store.clone());
+    let key = writer
+        .flush(
+            tenant,
+            partition,
+            commit_id,
+            Schema::spans_v1().fingerprint(),
+            &batch,
+        )
+        .await
+        .map_err(http_err)?;
+
+    state
+        .catalog
+        .register_wal_object(WalObjectRow {
+            wal_id: uuid::Uuid::new_v4(),
+            tenant_id: tenant,
+            partition_id: partition,
+            object_key: key.to_string(),
+            commit_id_min: commit_id,
+            commit_id_max: CommitId(commit_id.0 + n as u64 - 1),
+            byte_count: 0,
+            row_count: n as i64,
+            schema_fingerprint: Schema::spans_v1().fingerprint(),
+            consumed_at: None,
+            created_at: chrono::Utc::now(),
+        })
+        .await
+        .map_err(http_err)?;
+
+    Ok(Json(IngestResponse {
+        spans_accepted: n as u32,
+        wal_object_key: key.to_string(),
+    }))
+}
+
+fn http_err<E: std::fmt::Display>(e: E) -> (StatusCode, String) {
+    (StatusCode::INTERNAL_SERVER_ERROR, format!("{e}"))
+}

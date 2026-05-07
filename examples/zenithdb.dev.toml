@@ -1,0 +1,57 @@
+# Default Mac dev profile. Self-contained, no external services.
+
+[server]
+listen = "0.0.0.0:50051"
+http_listen = "0.0.0.0:8080"
+
+[storage]
+# "fs" | "s3" | "gcs" | "azure" | "memory"
+backend = "fs"
+fs_root = "./data/blobs"
+nvme_cache_dir = "./data/cache"
+nvme_cache_bytes = 4_294_967_296   # 4 GiB
+
+[catalog]
+# "sqlite" | "postgres"
+backend = "sqlite"
+sqlite_path = "./data/zenith.db"
+# postgres_url = "postgres://zen:zen@localhost:5432/zenith"
+
+[ingest]
+flush_interval_ms = 100
+flush_max_bytes = 67_108_864       # 64 MiB
+writer_threads = 4
+
+[compact]
+trigger_wal_count = 32
+trigger_wal_bytes = 268_435_456    # 256 MiB
+trigger_age_seconds = 300
+target_segment_bytes = 536_870_912 # 512 MiB
+worker_threads = 2
+
+[query]
+max_concurrent_queries = 256
+result_cache_max_bytes = 1_073_741_824  # 1 GiB
+
+[fts]
+indexed_fields = ["prompt", "completion", "tool_io_text"]
+
+[bitmap_index]
+indexed_columns = ["model", "tool_name", "status", "span_type", "provider"]
+
+[jsonpath_index]
+sample_size = 10_000
+min_presence_pct = 1.0
+max_paths_per_segment = 256
+
+[vector]
+enabled = true
+dimensions = 1536
+hnsw_m = 16
+hnsw_ef_construction = 200
+hnsw_ef_search = 50
+quantize = false
+
+[telemetry]
+log_level = "info"
+otlp_endpoint = ""   # disabled by default

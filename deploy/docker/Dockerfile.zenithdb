@@ -1,0 +1,27 @@
+# Multi-stage Dockerfile for ZenithDB.
+# Final image is gcr.io/distroless/cc-debian12 with the static binary.
+
+ARG RUST_VERSION=1.87
+FROM rust:${RUST_VERSION}-bookworm AS builder
+WORKDIR /src
+
+# Required for prost/tonic build.
+RUN apt-get update && apt-get install -y protobuf-compiler && rm -rf /var/lib/apt/lists/*
+
+# Copy workspace.
+COPY Cargo.toml Cargo.lock rust-toolchain.toml ./
+COPY .cargo/ .cargo/
+COPY proto/ proto/
+COPY crates/ crates/
+COPY examples/ examples/
+
+# Build.
+RUN cargo build --release --bin zenithdb --bin zen
+
+FROM gcr.io/distroless/cc-debian12
+COPY --from=builder /src/target/release/zenithdb /usr/local/bin/zenithdb
+COPY --from=builder /src/target/release/zen /usr/local/bin/zen
+COPY examples/zenithdb.dev.toml /etc/zenithdb/config.toml
+EXPOSE 8080 50051
+ENV ZEN_LOG=info
+ENTRYPOINT ["/usr/local/bin/zenithdb", "--config", "/etc/zenithdb/config.toml"]

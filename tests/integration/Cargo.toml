@@ -1,0 +1,29 @@
+[package]
+name = "zen_integration_tests"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[dependencies]
+zen_common = { path = "../../crates/zen_common" }
+zen_catalog = { path = "../../crates/zen_catalog" }
+zen_storage = { path = "../../crates/zen_storage" }
+zen_wal = { path = "../../crates/zen_wal" }
+zen_format = { path = "../../crates/zen_format" }
+zen_memtable = { path = "../../crates/zen_memtable" }
+zen_compactor = { path = "../../crates/zen_compactor" }
+zen_query = { path = "../../crates/zen_query" }
+zen_ql = { path = "../../crates/zen_ql" }
+zen_server = { path = "../../crates/zen_server" }
+zen_bench = { path = "../../crates/zen_bench" }
+tokio = { version = "1", features = ["full"] }
+chrono = { version = "0.4", features = ["serde"] }
+uuid = { version = "1", features = ["v4"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+reqwest = { version = "0.12", features = ["json"] }
+axum = "0.7"
+
+[[test]]
+name = "end_to_end"
+path = "end_to_end.rs"

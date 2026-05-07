@@ -1,0 +1,79 @@
+//! Admin endpoints: compact, list segments, health.
+
+use axum::{extract::State, http::StatusCode, Json};
+use serde::{Deserialize, Serialize};
+
+use zen_common::{PartitionId, Schema, TenantId};
+use zen_compactor::compact_partition;
+
+use crate::state::ServerState;
+
+#[derive(Clone, Debug, Deserialize)]
+pub struct CompactRequest {
+    pub tenant_id: u64,
+    #[serde(default)]
+    pub partition_id: u32,
+}
+
+#[derive(Clone, Debug, Serialize)]
+pub struct CompactResponse {
+    pub wal_objects_consumed: u32,
+    pub rows_compacted: u64,
+    pub segment_bytes: u64,
+    pub elapsed_ms: u64,
+}
+
+pub async fn handle_compact(
+    State(state): State<ServerState>,
+    Json(req): Json<CompactRequest>,
+) -> Result<Json<CompactResponse>, (StatusCode, String)> {
+    let tenant = TenantId(req.tenant_id);
+    let partition = PartitionId(req.partition_id);
+    let stats = compact_partition(
+        state.catalog.clone(),
+        state.store.clone(),
+        tenant,
+        partition,
+        "http-admin",
+        &Schema::spans_v1(),
+    )
+    .await
+    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("{e}")))?;
+    Ok(Json(CompactResponse {
+        wal_objects_consumed: stats.wal_objects_consumed,
+        rows_compacted: stats.rows_compacted,
+        segment_bytes: stats.segment_bytes,
+        elapsed_ms: stats.elapsed_ms,
+    }))
+}
+
+pub async fn handle_health() -> Json<serde_json::Value> {
+    Json(serde_json::json!({"status": "ok"}))
+}
+
+pub async fn handle_segments(
+    State(state): State<ServerState>,
+    axum::extract::Query(q): axum::extract::Query<SegmentsQuery>,
+) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+    let segs = state
+        .catalog
+        .list_segments_for_tenant(TenantId(q.tenant_id))
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("{e}")))?;
+    Ok(Json(serde_json::json!({
+        "count": segs.len(),
+        "segments": segs.iter().map(|s| serde_json::json!({
+            "segment_id": s.segment_id.to_string(),
+            "object_key": s.object_key,
+            "row_count": s.row_count,
+            "byte_count": s.byte_count,
+            "time_min": s.time_min,
+            "time_max": s.time_max,
+        })).collect::<Vec<_>>(),
+    })))
+}
+
+#[derive(Deserialize)]
+pub struct SegmentsQuery {
+    pub tenant_id: u64,
+}
