@@ -25,7 +25,7 @@ use crate::expr::{Expr, Literal};
 use crate::logical::{AggregateFn, LogicalPlan};
 use crate::physical::{aggregate_label, AggResult};
 use crate::row::{ResultRow, ResultSet, ResultStats};
-use crate::segment_cache::SegmentCache;
+use crate::segment_cache::{SegmentCache, SegmentExtras};
 use crate::segment_list_cache::SegmentListCache;
 
 pub async fn execute(
@@ -59,6 +59,18 @@ pub async fn execute_full(
     seg_cache: &SegmentCache,
     list_cache: &SegmentListCache,
 ) -> ZenResult<ResultSet> {
+    // Fast path: pure GROUP BY + COUNT(*), no ORDER BY. Bypass ResultRow
+    // construction and operate directly on the dict-encoded group_by columns.
+    if !plan.aggregates.is_empty()
+        && plan.order_by.is_none()
+        && plan
+            .aggregates
+            .iter()
+            .all(|(_, a)| matches!(a, AggregateFn::Count))
+    {
+        return execute_count_aggregate(plan, catalog, store, seg_cache, list_cache).await;
+    }
+
     let start = Instant::now();
     let mut stats = ResultStats::default();
 
@@ -205,13 +217,13 @@ async fn scan_one_segment(
     out: &mut Vec<ResultRow>,
     stats: &mut ResultStats,
 ) -> ZenResult<()> {
-    let reader = seg_cache.get_or_load(&seg.object_key, store).await?;
+    let extras = seg_cache.get_or_load(&seg.object_key, store).await?;
+    let reader = extras.reader.clone();
     let n_rgs = reader.row_group_count();
 
-    // Single row group: no spawn overhead. Multiple: parallel via spawn_blocking.
     if n_rgs <= 1 {
         for rg_idx in 0..n_rgs {
-            let res = scan_row_group(&reader, rg_idx, plan)?;
+            let res = scan_row_group(&extras, rg_idx, plan)?;
             out.extend(res.rows);
             stats.row_groups_pruned += res.pruned;
             stats.row_groups_scanned += res.scanned;
@@ -223,10 +235,10 @@ async fn scan_one_segment(
     let mut handles: Vec<tokio::task::JoinHandle<ZenResult<RgScanResult>>> =
         Vec::with_capacity(n_rgs);
     for rg_idx in 0..n_rgs {
-        let reader = reader.clone();
+        let extras = extras.clone();
         let plan = plan.clone();
         handles.push(tokio::task::spawn_blocking(move || {
-            scan_row_group(&reader, rg_idx, &plan)
+            scan_row_group(&extras, rg_idx, &plan)
         }));
     }
     for h in handles {
@@ -249,10 +261,11 @@ struct RgScanResult {
 }
 
 fn scan_row_group(
-    reader: &SegmentReader,
+    extras: &SegmentExtras,
     rg_idx: usize,
     plan: &LogicalPlan,
 ) -> ZenResult<RgScanResult> {
+    let reader = &extras.reader;
     let col_idx = |name: &str| -> Option<u32> {
         reader
             .metadata
@@ -298,7 +311,7 @@ fn scan_row_group(
         mask.insert(r as u32);
     }
     if let Some(expr) = predicate {
-        let bm = eval_predicate(reader, &col_idx, rg_idx, expr, row_count)?;
+        let bm = eval_predicate(extras, &col_idx, rg_idx, expr, row_count)?;
         mask &= bm;
     }
     if plan.time_min_ms != i64::MIN || plan.time_max_ms != i64::MAX {
@@ -322,19 +335,35 @@ fn scan_row_group(
     let rows_idx: Vec<usize> = mask.iter().map(|i| i as usize).collect();
     let mut local_stats = ResultStats::default();
     let limit = plan.limit.map(|l| l as usize);
+
+    // Aggregate fast path: when the query only needs group_by + count(*) (or
+    // sum/avg/min/max over numeric cols), we don't need to materialize wide
+    // string columns. Only decode the columns the aggregation references.
+    let aggregate_only = !plan.aggregates.is_empty()
+        && plan
+            .aggregates
+            .iter()
+            .all(|(_, a)| matches!(a, AggregateFn::Count));
     let mut buf: Vec<ResultRow> = Vec::with_capacity(rows_idx.len());
-    materialize_rows(
-        reader,
-        &col_idx,
-        rg_idx,
-        &rows_idx,
-        plan,
-        &mut buf,
-        &mut local_stats,
-    )?;
+    if aggregate_only && plan.order_by.is_none() {
+        // Only decode group_by columns. Skip wide-column materialization
+        // entirely.
+        let cols: Vec<String> = plan.group_by.clone();
+        materialize_rows_minimal(reader, &col_idx, rg_idx, &rows_idx, &cols, &mut buf)?;
+    } else {
+        materialize_rows(
+            reader,
+            &col_idx,
+            rg_idx,
+            &rows_idx,
+            plan,
+            &mut buf,
+            &mut local_stats,
+        )?;
+    }
     if let Some(l) = limit {
         if !plan.aggregates.is_empty() || plan.order_by.is_some() {
-            // Need full data for global aggregate / order; don't trim per-RG.
+            // Global aggregation / ordering needs all rows.
         } else {
             buf.truncate(l);
         }
@@ -342,6 +371,227 @@ fn scan_row_group(
     out.bytes_decoded_wide += local_stats.bytes_decoded_wide;
     out.rows = buf;
     Ok(out)
+}
+
+/// Minimal materialization: only decode the listed columns. Used for the
+/// aggregate fast path. Skips JSON encoding for columns we don't need.
+fn materialize_rows_minimal(
+    reader: &SegmentReader,
+    col_idx: &dyn Fn(&str) -> Option<u32>,
+    rg_idx: usize,
+    rows: &[usize],
+    cols: &[String],
+    out: &mut Vec<ResultRow>,
+) -> ZenResult<()> {
+    use zen_format::PageView;
+    let mut views: Vec<(String, PageView<'_>)> = Vec::new();
+    for c in cols {
+        if let Some(i) = col_idx(c) {
+            if reader.row_groups[rg_idx]
+                .descriptor_for_column(i)
+                .is_some()
+            {
+                views.push((c.clone(), reader.open_page(rg_idx, i)?));
+            }
+        }
+    }
+    let mut new_rows: Vec<ResultRow> = rows.iter().map(|_| ResultRow::default()).collect();
+    for (col_name, view) in &views {
+        for (i, &r) in rows.iter().enumerate() {
+            let v = view.row(r)?;
+            new_rows[i].fields.insert(col_name.clone(), row_value_to_json(v));
+        }
+    }
+    out.extend(new_rows);
+    Ok(())
+}
+
+/// Fast path: GROUP BY (...) COUNT(*). Skips materialization and aggregates
+/// directly on dict-encoded columns.
+async fn execute_count_aggregate(
+    plan: &LogicalPlan,
+    catalog: Arc<dyn Catalog>,
+    store: Arc<dyn BlobStore>,
+    seg_cache: &SegmentCache,
+    list_cache: &SegmentListCache,
+) -> ZenResult<ResultSet> {
+    use std::collections::BTreeMap;
+
+    let start = Instant::now();
+    let mut stats = ResultStats::default();
+    let tenant = TenantId(plan.tenant_id);
+    let trace_id_filter: Option<[u8; 16]> = plan
+        .predicate
+        .as_ref()
+        .and_then(|p| extract_trace_id_filter(&p.expr));
+
+    // Per-(group key tuple) → count.
+    let mut counts: BTreeMap<Vec<String>, i64> = BTreeMap::new();
+
+    for &p in &plan.partition_ids {
+        let all_segments = list_cache
+            .list(
+                &catalog,
+                tenant,
+                PartitionId(p),
+                plan.time_min_ms,
+                plan.time_max_ms,
+            )
+            .await?;
+        let segments: Vec<_> = if let Some(tid) = trace_id_filter {
+            all_segments
+                .iter()
+                .filter(|s| s.trace_id_min.0 <= tid && tid <= s.trace_id_max.0)
+                .cloned()
+                .collect()
+        } else {
+            all_segments.iter().cloned().collect()
+        };
+        stats.segments_scanned += segments.len() as u32;
+
+        // Spawn per-segment, merge into local map.
+        use futures::future::join_all;
+        let plan_clone = plan.clone();
+        let mut futs = Vec::with_capacity(segments.len());
+        for seg in segments.iter() {
+            let seg = seg.clone();
+            let store = store.clone();
+            let seg_cache = seg_cache.clone();
+            let plan = plan_clone.clone();
+            futs.push(async move {
+                count_one_segment(&seg, store, &seg_cache, &plan).await
+            });
+        }
+        for r in join_all(futs).await {
+            let (m, s) = r?;
+            stats.row_groups_pruned += s.row_groups_pruned;
+            stats.row_groups_scanned += s.row_groups_scanned;
+            for (k, v) in m {
+                *counts.entry(k).or_insert(0) += v;
+            }
+        }
+    }
+
+    // Build result rows.
+    let mut final_rows: Vec<ResultRow> = Vec::with_capacity(counts.len());
+    for (key, count) in counts {
+        let mut row = ResultRow::default();
+        for (i, col) in plan.group_by.iter().enumerate() {
+            row.fields.insert(
+                col.clone(),
+                serde_json::Value::String(key.get(i).cloned().unwrap_or_default()),
+            );
+        }
+        for (label, agg) in &plan.aggregates {
+            let lbl = aggregate_label(label, agg);
+            row.fields.insert(lbl, serde_json::Value::from(count));
+        }
+        final_rows.push(row);
+    }
+
+    if let Some(l) = plan.limit {
+        final_rows.truncate(l as usize);
+    }
+
+    stats.elapsed_ms = start.elapsed().as_millis() as u64;
+    stats.rows_returned = final_rows.len() as u32;
+    let mut columns: Vec<String> = plan.group_by.clone();
+    for (label, agg) in &plan.aggregates {
+        columns.push(aggregate_label(label, agg));
+    }
+    Ok(ResultSet {
+        columns,
+        rows: final_rows,
+        stats,
+    })
+}
+
+async fn count_one_segment(
+    seg: &SegmentRow,
+    store: Arc<dyn BlobStore>,
+    seg_cache: &SegmentCache,
+    plan: &LogicalPlan,
+) -> ZenResult<(std::collections::HashMap<Vec<String>, i64>, ResultStats)> {
+    use zen_format::{ColumnValues, RowValue};
+    let extras = seg_cache.get_or_load(&seg.object_key, store).await?;
+    let reader = &extras.reader;
+
+    let mut counts: std::collections::HashMap<Vec<String>, i64> =
+        std::collections::HashMap::with_capacity(64);
+    let mut stats = ResultStats::default();
+
+    for rg_idx in 0..reader.row_group_count() {
+        let row_count = reader.row_groups[rg_idx].row_count as usize;
+        let col_idx = |name: &str| -> Option<u32> {
+            reader
+                .metadata
+                .column_names
+                .iter()
+                .position(|c| c == name)
+                .map(|i| i as u32)
+        };
+
+        // Predicate prune via zone maps + posting-list lookup.
+        let predicate = plan.predicate.as_ref().map(|p| &p.expr);
+        if let Some(expr) = predicate {
+            if !zone_map_might_match(reader, &col_idx, rg_idx, expr) {
+                stats.row_groups_pruned += 1;
+                continue;
+            }
+        }
+
+        // Compute mask.
+        let mut mask = RoaringBitmap::new();
+        for r in 0..row_count {
+            mask.insert(r as u32);
+        }
+        if let Some(expr) = predicate {
+            let bm = eval_predicate(&extras, &col_idx, rg_idx, expr, row_count)?;
+            mask &= bm;
+        }
+        if mask.is_empty() {
+            stats.row_groups_pruned += 1;
+            continue;
+        }
+        stats.row_groups_scanned += 1;
+
+        // Fast path: no group_by → just add to total.
+        if plan.group_by.is_empty() {
+            *counts.entry(Vec::new()).or_insert(0) += mask.len() as i64;
+            continue;
+        }
+
+        // Decode each group_by column ONCE per row group, then iterate the mask.
+        let cols: Vec<u32> = plan
+            .group_by
+            .iter()
+            .filter_map(|c| col_idx(c))
+            .collect();
+        if cols.len() != plan.group_by.len() {
+            return Err(zen_common::ZenError::query("group_by column missing"));
+        }
+        let mut col_values: Vec<Vec<String>> = Vec::with_capacity(cols.len());
+        for &c in &cols {
+            let cv = reader.read_column(rg_idx, c)?;
+            let strs: Vec<String> = match cv {
+                ColumnValues::StringsOwned(v) => v
+                    .into_iter()
+                    .map(|s| String::from_utf8_lossy(&s).into_owned())
+                    .collect(),
+                ColumnValues::I64(v) => v.into_iter().map(|i| i.to_string()).collect(),
+                ColumnValues::F64(v) => v.into_iter().map(|f| f.to_string()).collect(),
+                _ => return Err(zen_common::ZenError::query("unsupported group_by col type")),
+            };
+            col_values.push(strs);
+        }
+        for r in mask.iter() {
+            let r = r as usize;
+            let key: Vec<String> = col_values.iter().map(|v| v[r].clone()).collect();
+            *counts.entry(key).or_insert(0) += 1;
+        }
+        let _ = RowValue::I64(0); // dummy to keep the import
+    }
+    Ok((counts, stats))
 }
 
 /// Walk the predicate tree looking for an `Eq(Column("trace_id"), Literal::String(ulid))`
@@ -438,39 +688,27 @@ fn zone_map_might_match(
     }
 }
 
-fn apply_predicate(
-    reader: &SegmentReader,
-    col_idx: &dyn Fn(&str) -> Option<u32>,
-    rg_idx: usize,
-    expr: &Expr,
-    mask: &mut RoaringBitmap,
-) -> ZenResult<()> {
-    let row_count = reader.row_groups[rg_idx].row_count as usize;
-    let bm = eval_predicate(reader, col_idx, rg_idx, expr, row_count)?;
-    *mask &= bm;
-    Ok(())
-}
-
 fn eval_predicate(
-    reader: &SegmentReader,
+    extras: &SegmentExtras,
     col_idx: &dyn Fn(&str) -> Option<u32>,
     rg_idx: usize,
     expr: &Expr,
     row_count: usize,
 ) -> ZenResult<RoaringBitmap> {
+    let reader = &extras.reader;
     match expr {
         Expr::And(a, b) => {
-            let l = eval_predicate(reader, col_idx, rg_idx, a, row_count)?;
-            let r = eval_predicate(reader, col_idx, rg_idx, b, row_count)?;
+            let l = eval_predicate(extras, col_idx, rg_idx, a, row_count)?;
+            let r = eval_predicate(extras, col_idx, rg_idx, b, row_count)?;
             Ok(l & r)
         }
         Expr::Or(a, b) => {
-            let l = eval_predicate(reader, col_idx, rg_idx, a, row_count)?;
-            let r = eval_predicate(reader, col_idx, rg_idx, b, row_count)?;
+            let l = eval_predicate(extras, col_idx, rg_idx, a, row_count)?;
+            let r = eval_predicate(extras, col_idx, rg_idx, b, row_count)?;
             Ok(l | r)
         }
         Expr::Not(a) => {
-            let l = eval_predicate(reader, col_idx, rg_idx, a, row_count)?;
+            let l = eval_predicate(extras, col_idx, rg_idx, a, row_count)?;
             let mut all = RoaringBitmap::new();
             for i in 0..row_count {
                 all.insert(i as u32);
@@ -480,9 +718,9 @@ fn eval_predicate(
         Expr::Eq(left, right) => match (left.as_ref(), right.as_ref()) {
             (Expr::Column(c), Expr::Literal(Literal::String(v))) => {
                 let i = col_idx(c).ok_or_else(|| ZenError::query(format!("column {c} not found")))?;
-                // Fast path: bitmap posting list lookup if available.
-                if let Some(bm) = posting_lookup(reader, rg_idx, i, v.as_bytes()) {
-                    return Ok(bm);
+                // Fast path: cached bitmap posting list lookup if available.
+                if let Some(bm) = extras.posting_lookup_cached(rg_idx as u32, i, v.as_bytes()) {
+                    return Ok((*bm).clone());
                 }
                 let cv = reader.read_column(rg_idx, i)?;
                 Ok(eq_string(&cv, v))
@@ -497,13 +735,17 @@ fn eval_predicate(
         Expr::Lt(_, _) | Expr::Le(_, _) | Expr::Gt(_, _) | Expr::Ge(_, _) | Expr::Ne(_, _) => {
             eval_compare(reader, col_idx, rg_idx, expr)
         }
-        Expr::TextMatch { .. } => {
-            // For now scan-fallback: read column, substring match. zen_fts integration is wired
-            // in the segment-level when an FTS index exists in the inline-indexes section; here
-            // we just provide correct behavior.
+        Expr::TextMatch { column, query } => {
+            // Cached FTS handle path.
+            if let Some(bm) = extras.fts_search_cached(rg_idx as u32, column, query) {
+                return Ok((*bm).clone());
+            }
             scan_text_match(reader, col_idx, rg_idx, expr)
         }
-        Expr::JsonPathEq { .. } => {
+        Expr::JsonPathEq { path, value } => {
+            if let Some(bm) = extras.jsonpath_lookup_cached(rg_idx as u32, path, value) {
+                return Ok((*bm).clone());
+            }
             scan_jsonpath_eq(reader, col_idx, rg_idx, expr)
         }
         Expr::Literal(Literal::Bool(true)) => {
@@ -572,7 +814,34 @@ fn scan_text_match(
 ) -> ZenResult<RoaringBitmap> {
     if let Expr::TextMatch { column, query } = expr {
         let i = col_idx(column).ok_or_else(|| ZenError::query(format!("column {column}")))?;
-        // Open the page once so we can ask for one row at a time when needed.
+        // Fast path: indexed FTS lookup if the segment has a Tantivy blob
+        // recorded in the hotcache for this column.
+        if let Some(rg_hc) = reader.hotcache.row_groups.get(rg_idx) {
+            if let Some(c) = rg_hc.columns.iter().find(|c| c.column_idx == i) {
+                if let (Some(off), Some(len)) = (c.fts_offset, c.fts_length) {
+                    let inline_base = reader.footer.inline_indexes_offset as usize;
+                    let start = inline_base + off as usize;
+                    let end = start + len as usize;
+                    if reader.bytes.len() >= end {
+                        let blob = &reader.bytes[start..end];
+                        match zen_fts::open_fts_index(blob) {
+                            Ok(handle) => {
+                                let q = zen_fts::FtsQuery {
+                                    field: Some(column),
+                                    query,
+                                    limit: 100_000,
+                                };
+                                if let Ok(bm) = handle.search_to_bitmap(&q) {
+                                    return Ok(bm);
+                                }
+                            }
+                            Err(_) => {}
+                        }
+                    }
+                }
+            }
+        }
+        // Scan fallback.
         let view = reader.open_page(rg_idx, i)?;
         let mut bm = RoaringBitmap::new();
         let needle = query.to_lowercase();
@@ -597,8 +866,31 @@ fn scan_jsonpath_eq(
     expr: &Expr,
 ) -> ZenResult<RoaringBitmap> {
     if let Expr::JsonPathEq { path, value } = expr {
-        let i = col_idx("metadata").ok_or_else(|| ZenError::query("no metadata column"))?;
-        let view = reader.open_page(rg_idx, i)?;
+        let meta_idx = col_idx("metadata").ok_or_else(|| ZenError::query("no metadata column"))?;
+        // Fast path: indexed JSON-path posting lookup.
+        if let Some(rg_hc) = reader.hotcache.row_groups.get(rg_idx) {
+            if let Some(c) = rg_hc.columns.iter().find(|c| c.column_idx == meta_idx) {
+                if let (Some(off), Some(len)) = (c.jsonpath_offset, c.jsonpath_length) {
+                    let inline_base = reader.footer.inline_indexes_offset as usize;
+                    let start = inline_base + off as usize;
+                    let end = start + len as usize;
+                    if reader.bytes.len() >= end {
+                        let bytes = &reader.bytes[start..end];
+                        if let Ok(idx) = zen_jsonpath::JsonPathIndex::deserialize(bytes) {
+                            if idx.knows_path(path) {
+                                let bm = idx
+                                    .lookup(path, value)
+                                    .cloned()
+                                    .unwrap_or_default();
+                                return Ok(bm);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        // Scan fallback.
+        let view = reader.open_page(rg_idx, meta_idx)?;
         let mut bm = RoaringBitmap::new();
         for r in 0..view.row_count() {
             if let RowValue::Bytes(b) = view.row(r)? {
