@@ -1,0 +1,6 @@
+[
+  {"name":"B2_time_range_attr_filter","p50_us":297.0,"p95_us":343.0,"p99_us":458.0,"n":39769},
+  {"name":"B3_fts_common_term","p50_us":422.0,"p95_us":471.0,"p99_us":694.0,"n":28172},
+  {"name":"B6_jsonpath_indexed","p50_us":1522.0,"p95_us":1639.0,"p99_us":2086.0,"n":7802},
+  {"name":"B8_aggregation_by_model","p50_us":528.0,"p95_us":620.0,"p99_us":878.0,"n":22212}
+]

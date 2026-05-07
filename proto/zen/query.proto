@@ -1,0 +1,22 @@
+syntax = "proto3";
+package zen.v1;
+
+message QueryRequest {
+  uint64 tenant_id = 1;
+  string query = 2;
+  // 0 = ZenithQL, 1 = SQL
+  uint32 dialect = 3;
+}
+
+message QueryResponse {
+  // Result rows as JSON-serialized strings.
+  repeated string rows_json = 1;
+  uint32 segments_scanned = 2;
+  uint32 row_groups_scanned = 3;
+  uint32 row_groups_pruned = 4;
+  uint64 elapsed_ms = 5;
+}
+
+service QueryService {
+  rpc Query(QueryRequest) returns (QueryResponse);
+}

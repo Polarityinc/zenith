@@ -1,0 +1,13 @@
+[package]
+name = "zen_chaos_tests"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[dependencies]
+zen_common = { path = "../../crates/zen_common" }
+zen_format = { path = "../../crates/zen_format" }
+
+[[test]]
+name = "corrupt_segment"
+path = "corrupt_segment.rs"

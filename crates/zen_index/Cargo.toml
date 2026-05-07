@@ -1,0 +1,25 @@
+[package]
+name = "zen_index"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+zen_common = { workspace = true }
+roaring = { workspace = true }
+ahash = { workspace = true }
+xxhash-rust = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+bytes = { workspace = true }
+thiserror = { workspace = true }
+
+[dev-dependencies]
+proptest = { workspace = true }
+criterion = { workspace = true }
+rand = { workspace = true }
+
+[[bench]]
+name = "index_bench"
+harness = false

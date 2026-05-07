@@ -1,0 +1,12 @@
+[package]
+name = "zen_perf_tests"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[dependencies]
+zen_common = { path = "../../crates/zen_common" }
+
+[[test]]
+name = "naive_reference"
+path = "naive_reference.rs"
