@@ -16,8 +16,13 @@ impl WalReader {
     /// Parse a WAL object into its header + a vector of record batches.
     /// Most flushes produce exactly one batch, but Arrow IPC streams may have many.
     pub fn parse(bytes: &[u8]) -> ZenResult<(WalHeader, Vec<RecordBatch>)> {
-        let (header, payload_zstd) = parse_wal_object(bytes)?;
-        let arrow_bytes = zen_compress::zstd_decompress(&payload_zstd)?;
+        let (header, payload) = parse_wal_object(bytes)?;
+        // LZ4 (matches the writer); falls back to ZSTD if the LZ4 decode
+        // fails so old WAL files written before the switch still load.
+        let arrow_bytes = match lz4_flex::decompress_size_prepended(&payload) {
+            Ok(b) => b,
+            Err(_) => zen_compress::zstd_decompress(&payload)?.to_vec(),
+        };
         Self::read_arrow_batches(&arrow_bytes).map(|b| (header, b))
     }
 
