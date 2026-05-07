@@ -340,9 +340,20 @@ fn scan_row_group(
         return Ok(out);
     }
     out.scanned += 1;
-    let rows_idx: Vec<usize> = mask.iter().map(|i| i as usize).collect();
-    let mut local_stats = ResultStats::default();
     let limit = plan.limit.map(|l| l as usize);
+
+    // LIMIT pushdown: when the query has a LIMIT and no global aggregation
+    // / ORDER BY, only materialize the first `limit` surviving rows from
+    // this row group. Without this, queries returning a large bitmap pay
+    // the cost of decoding every match before truncating to LIMIT.
+    let allow_limit_pushdown =
+        plan.aggregates.is_empty() && plan.order_by.is_none() && plan.group_by.is_empty();
+    let rows_idx: Vec<usize> = if let (Some(l), true) = (limit, allow_limit_pushdown) {
+        mask.iter().take(l).map(|i| i as usize).collect()
+    } else {
+        mask.iter().map(|i| i as usize).collect()
+    };
+    let mut local_stats = ResultStats::default();
 
     // Aggregate fast path: when the query only needs group_by + count(*) (or
     // sum/avg/min/max over numeric cols), we don't need to materialize wide
