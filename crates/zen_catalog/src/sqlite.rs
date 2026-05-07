@@ -474,6 +474,29 @@ impl Catalog for SqliteCatalog {
         .map_err(|e| ZenError::catalog(format!("list_segments_for_tenant: {e}")))?;
         rows.into_iter().map(|r| r.into_row()).collect()
     }
+
+    async fn mark_segments_superseded(
+        &self,
+        segment_ids: &[uuid::Uuid],
+        at: DateTime<Utc>,
+    ) -> ZenResult<u64> {
+        if segment_ids.is_empty() {
+            return Ok(0);
+        }
+        let mut total: u64 = 0;
+        for id in segment_ids {
+            let r = sqlx::query(
+                "UPDATE segments SET superseded_at=?1 WHERE segment_id=?2 AND superseded_at IS NULL",
+            )
+            .bind(at.to_rfc3339())
+            .bind(id.as_bytes().to_vec())
+            .execute(&self.pool)
+            .await
+            .map_err(|e| ZenError::catalog(format!("mark superseded: {e}")))?;
+            total += r.rows_affected();
+        }
+        Ok(total)
+    }
 }
 
 #[derive(sqlx::FromRow)]

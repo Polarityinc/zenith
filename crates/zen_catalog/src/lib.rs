@@ -81,6 +81,14 @@ pub trait Catalog: Send + Sync + 'static {
 
     /// Used by query planners that hold per-tenant info: list segments by tenant.
     async fn list_segments_for_tenant(&self, tenant: TenantId) -> ZenResult<Vec<SegmentRow>>;
+
+    /// Mark a set of segments as superseded by a tier-2 / tier-N compaction.
+    /// Superseded segments are no longer returned by `list_segments_*`.
+    async fn mark_segments_superseded(
+        &self,
+        segment_ids: &[uuid::Uuid],
+        at: DateTime<Utc>,
+    ) -> ZenResult<u64>;
 }
 
 pub async fn open_catalog(cfg: &Config) -> ZenResult<Arc<dyn Catalog>> {
