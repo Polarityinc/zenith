@@ -121,23 +121,31 @@ pub async fn execute_full(
                 .await?;
             }
         } else {
-            use futures::future::join_all;
+            // Bounded concurrency: stream segments through a window of
+            // MAX_IN_FLIGHT in-flight scans. Doesn't matter for 50 segments,
+            // matters for 10,000+.
+            use futures::stream::{self, StreamExt};
+            const MAX_IN_FLIGHT: usize = 64;
             let plan_clone = plan.clone();
-            let mut futs = Vec::with_capacity(segments.len());
-            for seg in segments.iter() {
-                let seg_clone = seg.clone();
-                let store = store.clone();
-                let seg_cache = seg_cache.clone();
-                let plan = plan_clone.clone();
-                futs.push(async move {
-                    let mut rows: Vec<ResultRow> = Vec::new();
-                    let mut s = ResultStats::default();
-                    scan_one_segment(&seg_clone, store, &seg_cache, &plan, &mut rows, &mut s)
-                        .await
-                        .map(|()| (rows, s))
-                });
-            }
-            let results = join_all(futs).await;
+            let store = store.clone();
+            let seg_cache = seg_cache.clone();
+            let results: Vec<ZenResult<(Vec<ResultRow>, ResultStats)>> =
+                stream::iter(segments.into_iter())
+                    .map(|seg| {
+                        let store = store.clone();
+                        let seg_cache = seg_cache.clone();
+                        let plan = plan_clone.clone();
+                        async move {
+                            let mut rows: Vec<ResultRow> = Vec::new();
+                            let mut s = ResultStats::default();
+                            scan_one_segment(&seg, store, &seg_cache, &plan, &mut rows, &mut s)
+                                .await
+                                .map(|()| (rows, s))
+                        }
+                    })
+                    .buffer_unordered(MAX_IN_FLIGHT)
+                    .collect()
+                    .await;
             for r in results {
                 let (rows, s) = r?;
                 all_rows.extend(rows);
@@ -561,7 +569,6 @@ async fn count_one_segment(
             continue;
         }
 
-        // Decode each group_by column ONCE per row group, then iterate the mask.
         let cols: Vec<u32> = plan
             .group_by
             .iter()
@@ -570,6 +577,30 @@ async fn count_one_segment(
         if cols.len() != plan.group_by.len() {
             return Err(zen_common::ZenError::query("group_by column missing"));
         }
+
+        // Fast path: single dict-encoded group_by column → count by dict_id
+        // directly. Avoids 100K String allocations per row group.
+        if cols.len() == 1 {
+            use zen_format::PageView;
+            let view = reader.open_page(rg_idx, cols[0])?;
+            if let PageView::Dict(dec) = view {
+                // For each row in mask, look up dict key (u32 → u32 counter).
+                let mut local: std::collections::HashMap<u32, i64> =
+                    std::collections::HashMap::with_capacity(dec.dict.len());
+                for r in mask.iter() {
+                    let r = r as usize;
+                    let k = dec.keys[r];
+                    *local.entry(k).or_insert(0) += 1;
+                }
+                for (k, c) in local {
+                    let s = String::from_utf8_lossy(&dec.dict[k as usize]).into_owned();
+                    *counts.entry(vec![s]).or_insert(0) += c;
+                }
+                continue;
+            }
+        }
+
+        // General path: decode each group_by column to Vec<String>, key by tuple.
         let mut col_values: Vec<Vec<String>> = Vec::with_capacity(cols.len());
         for &c in &cols {
             let cv = reader.read_column(rg_idx, c)?;
@@ -589,7 +620,6 @@ async fn count_one_segment(
             let key: Vec<String> = col_values.iter().map(|v| v[r].clone()).collect();
             *counts.entry(key).or_insert(0) += 1;
         }
-        let _ = RowValue::I64(0); // dummy to keep the import
     }
     Ok((counts, stats))
 }
