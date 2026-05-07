@@ -6,10 +6,10 @@ Apple M4 Pro (24 GB RAM) · macOS 26 · Tokio runtime.
 
 | Test | Zenith p95 | Postgres p95 | DuckDB p95 |
 |---|---:|---:|---:|
-| Span load (trace inspect) | 3.1 ms | 3.9 ms | 2.7 ms |
-| Full-text search 'memory' | 0.9 ms | 9.8 ms | 1.0 ms |
-| Write flush (100 × 100 KB) | 52.0 ms | 264.9 ms | 112.3 ms |
-| Write visible (read-after-flush) | 0.0 ms | 264.9 ms (sync) | 112.3 ms (sync) |
+| Span load (trace inspect) | 1.1 ms | 0.6 ms | 0.3 ms |
+| Full-text search 'memory' | 0.9 ms | 7.6 ms | 1.0 ms |
+| Write flush (100 × 100 KB) | 38.5 ms | 299.6 ms | 107.5 ms |
+| Write visible (read-after-flush) | 0.0 ms | 299.6 ms (sync) | 107.5 ms (sync) |
 
 ## Brainstore reference numbers (their March 2025 post)
 
