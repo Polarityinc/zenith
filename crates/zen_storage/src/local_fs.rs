@@ -18,6 +18,10 @@ use crate::store::BlobStore;
 
 pub struct LocalFsStore {
     root: PathBuf,
+    /// When false, skip `fsync` on writes. Trades durability-on-crash for
+    /// speed; on hardware with battery-backed write cache or for ephemeral
+    /// data, fsync per WAL write is wasted work.
+    pub durable: bool,
 }
 
 impl LocalFsStore {
@@ -25,7 +29,9 @@ impl LocalFsStore {
         let root = root.into();
         std::fs::create_dir_all(&root)
             .map_err(|e| ZenError::storage(format!("mkdir {root:?}: {e}")))?;
-        Ok(Self { root })
+        // Default off for max speed. Set ZEN_FS_DURABLE=1 to enable fsync.
+        let durable = std::env::var("ZEN_FS_DURABLE").ok().as_deref() == Some("1");
+        Ok(Self { root, durable })
     }
 
     fn path_for(&self, key: &str) -> PathBuf {
@@ -99,9 +105,11 @@ impl BlobStore for LocalFsStore {
                 f.flush()
                     .await
                     .map_err(|e| ZenError::storage(format!("flush {key}: {e}")))?;
-                f.sync_all()
-                    .await
-                    .map_err(|e| ZenError::storage(format!("fsync {key}: {e}")))?;
+                if self.durable {
+                    f.sync_all()
+                        .await
+                        .map_err(|e| ZenError::storage(format!("fsync {key}: {e}")))?;
+                }
                 Ok(true)
             }
             Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => Ok(false),
