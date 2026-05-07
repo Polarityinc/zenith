@@ -5741,6 +5741,7 @@ dependencies = [
  "bytes",
  "crc32fast",
  "criterion",
+ "lz4_flex",
  "tempfile",
  "thiserror 1.0.69",
  "tokio",
