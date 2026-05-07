@@ -5,11 +5,11 @@ Postgres has covering btree on (model, status) and a GIN trigram on prompt; Duck
 
 | Query | Zenith p50/p95 µs | Postgres p50/p95 µs | DuckDB p50/p95 µs | Zenith vs Postgres | Zenith vs DuckDB |
 |---|---:|---:|---:|---:|---:|
-| B1_trace_load | 493 / 601 | 7736 / 9665 | 562 / 850 | 16.09× faster | 1.42× faster |
-| B2_attr_filter | 655 / 855 | 189 / 229 | 172 / 214 | 0.27× faster | 0.25× faster |
-| B3_fts_memory | 627 / 813 | 419 / 1175 | 129 / 220 | 1.45× faster | 0.27× faster |
-| B6_jsonpath | 558 / 698 | 80 / 94 | 285 / 318 | 0.14× faster | 0.46× faster |
-| B8_group_by_model | 1411 / 1591 | 3921 / 6604 | 2052 / 3483 | 4.15× faster | 2.19× faster |
+| B1_trace_load | 604 / 1025 | 9776 / 11006 | 408 / 801 | 10.74× faster | 0.78× faster |
+| B2_attr_filter | 730 / 1167 | 222 / 356 | 189 / 290 | 0.31× faster | 0.25× faster |
+| B3_fts_memory | 735 / 1289 | 484 / 1179 | 142 / 281 | 0.91× faster | 0.22× faster |
+| B6_jsonpath | 608 / 1012 | 103 / 157 | 280 / 431 | 0.16× faster | 0.43× faster |
+| B8_group_by_model | 1625 / 2313 | 4118 / 7404 | 2290 / 2788 | 3.20× faster | 1.21× faster |
 
 ## Caveats
 
