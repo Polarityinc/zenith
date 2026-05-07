@@ -3,7 +3,7 @@
 use axum::routing::{get, post};
 use axum::Router;
 
-use crate::admin::{handle_compact, handle_health, handle_segments};
+use crate::admin::{handle_compact, handle_compact_full, handle_health, handle_segments};
 use crate::ingest::handle_ingest;
 use crate::otlp::handle_otlp_traces;
 use crate::query_handler::handle_query;
@@ -16,6 +16,7 @@ pub fn router(state: ServerState) -> Router {
         .route("/v1/traces", post(handle_otlp_traces))
         .route("/v1/query", post(handle_query))
         .route("/v1/compact", post(handle_compact))
+        .route("/v1/compact-full", post(handle_compact_full))
         .route("/v1/segments", get(handle_segments))
         .with_state(state)
 }

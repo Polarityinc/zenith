@@ -645,9 +645,21 @@ fn zone_map_might_match(
         Expr::Eq(left, right) => match (left.as_ref(), right.as_ref()) {
             (Expr::Column(c), Expr::Literal(Literal::String(v))) => {
                 if let Some(zm) = lookup_zm(c) {
-                    if let ZoneMapValue::Bytes { min, max } = &zm.value {
-                        return v.as_bytes() >= min.as_slice()
-                            && v.as_bytes() <= max.as_slice();
+                    match &zm.value {
+                        ZoneMapValue::Bytes { min, max } => {
+                            return v.as_bytes() >= min.as_slice()
+                                && v.as_bytes() <= max.as_slice();
+                        }
+                        ZoneMapValue::Fixed { min, max } => {
+                            // trace_id / span_id columns: parse ULID literal.
+                            if let Ok(u) = ulid::Ulid::from_string(v) {
+                                let bytes = u.0.to_be_bytes();
+                                let bs: &[u8] = &bytes;
+                                return bs >= min.as_slice() && bs <= max.as_slice();
+                            }
+                            return true;
+                        }
+                        _ => {}
                     }
                 }
                 true

@@ -309,3 +309,237 @@ mod tests {
         assert_eq!(stats.rows_compacted, 0);
     }
 }
+
+/// Tier-N compaction: read every active segment + every unconsumed WAL,
+/// merge into one big segment, mark inputs as superseded/consumed.
+///
+/// This is the "compact everything for this tenant/partition into one
+/// segment" mode. Run periodically (or on demand) once the segment count
+/// gets high enough that scans pay multi-segment overhead.
+pub async fn compact_full(
+    catalog: Arc<dyn Catalog>,
+    store: Arc<dyn BlobStore>,
+    tenant: TenantId,
+    partition: PartitionId,
+    worker_id: &str,
+    schema: &Schema,
+) -> ZenResult<CompactionStats> {
+    use zen_format::{ColumnValues, SegmentReader};
+    let start = std::time::Instant::now();
+    catalog
+        .acquire_compaction_lease(tenant, partition, worker_id, 120)
+        .await?;
+
+    // Collect all rows from all existing active segments.
+    let segs = catalog.list_segments_in_range(tenant, partition, i64::MIN, i64::MAX).await?;
+    let mut all_rows: Vec<zen_common::SpanRecord> = Vec::new();
+    for seg in &segs {
+        let bytes = store.get(&seg.object_key).await?;
+        let reader = SegmentReader::from_bytes(bytes.to_vec())?;
+        let n_rgs = reader.row_group_count();
+        // Decode all rows from this segment back to SpanRecord.
+        for rg_idx in 0..n_rgs {
+            let n = reader.row_groups[rg_idx].row_count as usize;
+            decode_row_group_to_records(&reader, rg_idx, n, &mut all_rows)?;
+        }
+    }
+
+    // Plus any unconsumed WAL.
+    let wals = catalog.list_wal_objects(tenant, partition, CommitId(0)).await?;
+    if !wals.is_empty() {
+        let keys: Vec<String> = wals.iter().map(|w| w.object_key.clone()).collect();
+        let merged = merge_wals(store.clone(), &keys).await?;
+        all_rows.extend(merged.rows);
+    }
+
+    if all_rows.is_empty() {
+        catalog.release_compaction_lease(tenant, partition, worker_id).await.ok();
+        return Ok(CompactionStats::default());
+    }
+
+    // Re-sort globally for trace-locality.
+    all_rows.sort_by(|a, b| {
+        a.trace_id.0.cmp(&b.trace_id.0)
+            .then_with(|| a.start_time_ms.cmp(&b.start_time_ms))
+            .then_with(|| a.span_id.0.cmp(&b.span_id.0))
+    });
+    // Tombstone resolution by (tenant, span_id) — keep highest commit_id.
+    let n_before = all_rows.len();
+    let mut seen: std::collections::HashMap<(u64, [u8; 16]), u64> =
+        std::collections::HashMap::with_capacity(n_before);
+    for r in &all_rows {
+        let key = (r.tenant_id.0, r.span_id.0);
+        let entry = seen.entry(key).or_insert(0);
+        if r.commit_id.0 > *entry {
+            *entry = r.commit_id.0;
+        }
+    }
+    all_rows.retain(|r| {
+        let cid = seen.get(&(r.tenant_id.0, r.span_id.0)).copied().unwrap_or(0);
+        r.commit_id.0 == cid
+    });
+    let n_rows = all_rows.len();
+
+    let opts = BuildOptions::default();
+    let (segment_bytes, meta) = build_segment_from_rows(&all_rows, tenant, partition, schema, &opts)?;
+
+    // Build sparse rowgroup index.
+    let mut sparse = SparseRowGroupIndex::new();
+    let reader = zen_format::SegmentReader::from_bytes(segment_bytes.clone())?;
+    let mut rg_start = 0usize;
+    for rg in &reader.row_groups {
+        let end = (rg_start + rg.row_count as usize).min(all_rows.len());
+        let chunk = &all_rows[rg_start..end];
+        if !chunk.is_empty() {
+            let min_tid = chunk.iter().map(|r| r.trace_id.0).min().unwrap();
+            let max_tid = chunk.iter().map(|r| r.trace_id.0).max().unwrap();
+            let min_t = chunk.iter().map(|r| r.start_time_ms).min().unwrap();
+            let max_t = chunk.iter().map(|r| r.start_time_ms).max().unwrap();
+            let min_c = chunk.iter().map(|r| r.commit_id.0).min().unwrap();
+            let max_c = chunk.iter().map(|r| r.commit_id.0).max().unwrap();
+            sparse.push(RowGroupKey {
+                min_trace_id: min_tid, max_trace_id: max_tid,
+                min_start_time: min_t, max_start_time: max_t,
+                min_commit_id: min_c, max_commit_id: max_c,
+            });
+        }
+        rg_start = end;
+    }
+    let sparse_bytes = sparse.serialize().map_err(|e| ZenError::compactor(format!("sparse: {e}")))?;
+
+    let object_key = format!("segments/{}/{}/{}.zseg",
+        tenant, partition, Ulid::from(meta.segment_id));
+    store.put(&object_key, Bytes::from(segment_bytes.clone())).await?;
+    catalog.register_segment(SegmentRow {
+        segment_id: Uuid::from_u128(meta.segment_id),
+        tenant_id: tenant, partition_id: partition,
+        object_key: object_key.clone(),
+        level: 1,  // tier-2
+        byte_count: segment_bytes.len() as i64,
+        row_count: n_rows as i64,
+        time_min: meta.time_min_ms, time_max: meta.time_max_ms,
+        trace_id_min: meta.trace_id_min, trace_id_max: meta.trace_id_max,
+        commit_id_min: meta.commit_id_min, commit_id_max: meta.commit_id_max,
+        schema_fingerprint: meta.schema_fingerprint,
+        rowgroup_index: sparse_bytes.to_vec(),
+        superseded_at: None, created_at: Utc::now(),
+    }).await?;
+
+    // Mark old segments superseded.
+    let old_ids: Vec<Uuid> = segs.iter().map(|s| s.segment_id).collect();
+    catalog.mark_segments_superseded(&old_ids, Utc::now()).await?;
+
+    // Mark WALs consumed.
+    if !wals.is_empty() {
+        let consumed_through = wals.iter().map(|w| w.commit_id_max).max().unwrap_or(CommitId(0));
+        catalog.mark_wal_consumed(tenant, partition, consumed_through, Utc::now()).await.ok();
+    }
+
+    catalog.release_compaction_lease(tenant, partition, worker_id).await.ok();
+    Ok(CompactionStats {
+        wal_objects_consumed: wals.len() as u32,
+        rows_compacted: n_rows as u64,
+        segment_bytes: segment_bytes.len() as u64,
+        elapsed_ms: start.elapsed().as_millis() as u64,
+    })
+}
+
+fn decode_row_group_to_records(
+    reader: &zen_format::SegmentReader,
+    rg_idx: usize,
+    n: usize,
+    out: &mut Vec<zen_common::SpanRecord>,
+) -> ZenResult<()> {
+    use zen_format::ColumnValues;
+    use zen_common::{SpanRecord, TenantId, PartitionId, TraceId, SpanId, CommitId};
+
+    let col_idx = |name: &str| -> Option<u32> {
+        reader.metadata.column_names.iter().position(|c| c == name).map(|i| i as u32)
+    };
+
+    // Decode each column we care about. We only care about columns that survive
+    // the round-trip; missing columns become None.
+    let tenant: Vec<i64> = match col_idx("tenant_id").and_then(|i| reader.read_column(rg_idx, i).ok()) {
+        Some(ColumnValues::I64(v)) => v, _ => vec![0; n],
+    };
+    let partition: Vec<i64> = match col_idx("partition_id").and_then(|i| reader.read_column(rg_idx, i).ok()) {
+        Some(ColumnValues::I64(v)) => v, _ => vec![0; n],
+    };
+    let trace_id: Vec<[u8;16]> = match col_idx("trace_id").and_then(|i| reader.read_column(rg_idx, i).ok()) {
+        Some(ColumnValues::Fixed16(v)) => v, _ => vec![[0;16]; n],
+    };
+    let span_id: Vec<[u8;16]> = match col_idx("span_id").and_then(|i| reader.read_column(rg_idx, i).ok()) {
+        Some(ColumnValues::Fixed16(v)) => v, _ => vec![[0;16]; n],
+    };
+    let parent_span_id: Vec<[u8;16]> = match col_idx("parent_span_id").and_then(|i| reader.read_column(rg_idx, i).ok()) {
+        Some(ColumnValues::Fixed16(v)) => v, _ => vec![[0;16]; n],
+    };
+    let start_time: Vec<i64> = match col_idx("start_time_ms").and_then(|i| reader.read_column(rg_idx, i).ok()) {
+        Some(ColumnValues::I64(v)) => v, _ => vec![0; n],
+    };
+    let end_time: Vec<i64> = match col_idx("end_time_ms").and_then(|i| reader.read_column(rg_idx, i).ok()) {
+        Some(ColumnValues::I64(v)) => v, _ => vec![0; n],
+    };
+    let duration: Vec<i64> = match col_idx("duration_ms").and_then(|i| reader.read_column(rg_idx, i).ok()) {
+        Some(ColumnValues::I64(v)) => v, _ => vec![0; n],
+    };
+    let model: Vec<Vec<u8>> = match col_idx("model").and_then(|i| reader.read_column(rg_idx, i).ok()) {
+        Some(ColumnValues::StringsOwned(v)) => v, _ => vec![Vec::new(); n],
+    };
+    let status: Vec<Vec<u8>> = match col_idx("status").and_then(|i| reader.read_column(rg_idx, i).ok()) {
+        Some(ColumnValues::StringsOwned(v)) => v, _ => vec![Vec::new(); n],
+    };
+    let provider: Vec<Vec<u8>> = match col_idx("provider").and_then(|i| reader.read_column(rg_idx, i).ok()) {
+        Some(ColumnValues::StringsOwned(v)) => v, _ => vec![Vec::new(); n],
+    };
+    let tool_name: Vec<Vec<u8>> = match col_idx("tool_name").and_then(|i| reader.read_column(rg_idx, i).ok()) {
+        Some(ColumnValues::StringsOwned(v)) => v, _ => vec![Vec::new(); n],
+    };
+    let span_type: Vec<Vec<u8>> = match col_idx("span_type").and_then(|i| reader.read_column(rg_idx, i).ok()) {
+        Some(ColumnValues::StringsOwned(v)) => v, _ => vec![Vec::new(); n],
+    };
+    let prompt: Vec<Vec<u8>> = match col_idx("prompt").and_then(|i| reader.read_column(rg_idx, i).ok()) {
+        Some(ColumnValues::StringsOwned(v)) => v, _ => vec![Vec::new(); n],
+    };
+    let completion: Vec<Vec<u8>> = match col_idx("completion").and_then(|i| reader.read_column(rg_idx, i).ok()) {
+        Some(ColumnValues::StringsOwned(v)) => v, _ => vec![Vec::new(); n],
+    };
+    let metadata: Vec<Vec<u8>> = match col_idx("metadata").and_then(|i| reader.read_column(rg_idx, i).ok()) {
+        Some(ColumnValues::BytesOwned(v)) => v, _ => vec![Vec::new(); n],
+    };
+    let commit_id: Vec<i64> = match col_idx("commit_id").and_then(|i| reader.read_column(rg_idx, i).ok()) {
+        Some(ColumnValues::I64(v)) => v, _ => vec![0; n],
+    };
+
+    fn opt_str(b: Vec<u8>) -> Option<String> {
+        if b.is_empty() { None } else { String::from_utf8(b).ok() }
+    }
+
+    for i in 0..n {
+        out.push(SpanRecord {
+            tenant_id: TenantId(tenant[i] as u64),
+            partition_id: PartitionId(partition[i] as u32),
+            trace_id: TraceId(trace_id[i]),
+            span_id: SpanId(span_id[i]),
+            parent_span_id: if parent_span_id[i] == [0;16] { None } else { Some(SpanId(parent_span_id[i])) },
+            start_time_ms: start_time[i],
+            end_time_ms: end_time[i],
+            duration_ms: duration[i],
+            span_type: opt_str(span_type[i].clone()),
+            status: opt_str(status[i].clone()),
+            provider: opt_str(provider[i].clone()),
+            model: opt_str(model[i].clone()),
+            tool_name: opt_str(tool_name[i].clone()),
+            prompt: opt_str(prompt[i].clone()),
+            completion: opt_str(completion[i].clone()),
+            prompt_tokens: None, completion_tokens: None,
+            cost_usd: None, temperature: None, top_p: None,
+            tool_io_text: None,
+            user_id: None, session_id: None, request_id: None,
+            metadata: if metadata[i].is_empty() { None } else { serde_json::from_slice(&metadata[i]).ok() },
+            embedding: None,
+            commit_id: CommitId(commit_id[i] as u64),
+        });
+    }
+    Ok(())
+}

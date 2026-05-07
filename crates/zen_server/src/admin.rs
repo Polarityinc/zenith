@@ -4,7 +4,7 @@ use axum::{extract::State, http::StatusCode, Json};
 use serde::{Deserialize, Serialize};
 
 use zen_common::{PartitionId, Schema, TenantId};
-use zen_compactor::compact_partition;
+use zen_compactor::{compact_full, compact_partition};
 
 use crate::state::ServerState;
 
@@ -35,6 +35,30 @@ pub async fn handle_compact(
         tenant,
         partition,
         "http-admin",
+        &Schema::spans_v1(),
+    )
+    .await
+    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("{e}")))?;
+    Ok(Json(CompactResponse {
+        wal_objects_consumed: stats.wal_objects_consumed,
+        rows_compacted: stats.rows_compacted,
+        segment_bytes: stats.segment_bytes,
+        elapsed_ms: stats.elapsed_ms,
+    }))
+}
+
+pub async fn handle_compact_full(
+    State(state): State<ServerState>,
+    Json(req): Json<CompactRequest>,
+) -> Result<Json<CompactResponse>, (StatusCode, String)> {
+    let tenant = TenantId(req.tenant_id);
+    let partition = PartitionId(req.partition_id);
+    let stats = compact_full(
+        state.catalog.clone(),
+        state.store.clone(),
+        tenant,
+        partition,
+        "http-admin-full",
         &Schema::spans_v1(),
     )
     .await
