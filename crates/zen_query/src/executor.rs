@@ -154,6 +154,20 @@ pub async fn execute_full(
                 stats.bytes_decoded_wide += s.bytes_decoded_wide;
             }
         }
+
+        // Sync write visibility: scan unconsumed WAL files in the same
+        // partition. Pure WALs are small (cap at flush_max_bytes per object).
+        // We only scan if there's no expensive filtering they can't support.
+        let wal_rows = scan_unconsumed_wals(
+            &catalog,
+            store.clone(),
+            tenant,
+            PartitionId(p),
+            plan,
+            trace_id_filter,
+        )
+        .await?;
+        all_rows.extend(wal_rows);
     }
 
     // ORDER BY (string or numeric).
@@ -488,6 +502,34 @@ async fn execute_count_aggregate(
             for (k, v) in m {
                 *counts.entry(k).or_insert(0) += v;
             }
+        }
+
+        // Sync write visibility for COUNT GROUP BY: also count rows in
+        // unconsumed WAL files. We pull them as ResultRow then aggregate.
+        let wal_rows = scan_unconsumed_wals(
+            &catalog,
+            store.clone(),
+            tenant,
+            PartitionId(p),
+            plan,
+            trace_id_filter,
+        )
+        .await?;
+        for row in wal_rows {
+            let key: Vec<String> = plan
+                .group_by
+                .iter()
+                .map(|c| {
+                    row.fields
+                        .get(c)
+                        .map(|v| match v {
+                            serde_json::Value::String(s) => s.clone(),
+                            other => other.to_string(),
+                        })
+                        .unwrap_or_default()
+                })
+                .collect();
+            *counts.entry(key).or_insert(0) += 1;
         }
     }
 
@@ -1382,5 +1424,231 @@ mod tests {
             .filter_map(|r| r.fields.get("count").and_then(|v| v.as_i64()))
             .sum();
         assert_eq!(total, 50);
+    }
+}
+
+/// Scan all WAL objects that haven't been consumed by a compaction yet, apply
+/// the predicate, and return matching rows. This is the "writes are visible
+/// on PUT-ack" path — without it, queries only see rows that have made it into
+/// a published segment.
+async fn scan_unconsumed_wals(
+    catalog: &Arc<dyn Catalog>,
+    store: Arc<dyn BlobStore>,
+    tenant: TenantId,
+    partition: PartitionId,
+    plan: &LogicalPlan,
+    trace_id_filter: Option<[u8; 16]>,
+) -> ZenResult<Vec<ResultRow>> {
+    use zen_common::{CommitId, SpanRecord};
+    use zen_wal::WalReader;
+
+    let wals = catalog
+        .list_wal_objects(tenant, partition, CommitId(0))
+        .await?;
+    if wals.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    use futures::stream::{self, StreamExt};
+    const MAX_IN_FLIGHT: usize = 64;
+    let plan_clone = plan.clone();
+    let store_clone = store.clone();
+    let results: Vec<ZenResult<Vec<ResultRow>>> = stream::iter(wals.into_iter())
+        .map(|wal| {
+            let store = store_clone.clone();
+            let plan = plan_clone.clone();
+            async move {
+                let bytes = match store.get(&wal.object_key).await {
+                    Ok(b) => b,
+                    Err(_) => return Ok(Vec::new()), // WAL deleted / superseded
+                };
+                let (_h, batches) = match WalReader::parse(&bytes) {
+                    Ok(p) => p,
+                    Err(_) => return Ok(Vec::new()),
+                };
+                let mut all = Vec::new();
+                for batch in batches {
+                    let mut rows = Vec::new();
+                    arrow_batch_to_rows(&batch, &plan, trace_id_filter, &mut rows)?;
+                    all.extend(rows);
+                }
+                Ok::<Vec<ResultRow>, zen_common::ZenError>(all)
+            }
+        })
+        .buffer_unordered(MAX_IN_FLIGHT)
+        .collect()
+        .await;
+    let mut out: Vec<ResultRow> = Vec::new();
+    for r in results {
+        out.extend(r?);
+    }
+    Ok(out)
+}
+
+fn arrow_batch_to_rows(
+    batch: &arrow_array::RecordBatch,
+    plan: &LogicalPlan,
+    trace_id_filter: Option<[u8; 16]>,
+    out: &mut Vec<ResultRow>,
+) -> ZenResult<()> {
+    use arrow_array::{Array, FixedSizeBinaryArray, Int64Array, StringArray, UInt32Array, UInt64Array};
+
+    let schema = batch.schema();
+    let n = batch.num_rows();
+    let trace_id_col = schema
+        .index_of("trace_id")
+        .ok()
+        .and_then(|i| {
+            batch
+                .column(i)
+                .as_any()
+                .downcast_ref::<FixedSizeBinaryArray>()
+                .map(|a| a.clone())
+        });
+
+    let limit = plan.limit.map(|l| l as usize);
+
+    for row_idx in 0..n {
+        // Trace_id pre-filter.
+        if let (Some(tid_filter), Some(arr)) = (trace_id_filter, &trace_id_col) {
+            let bytes = arr.value(row_idx);
+            if bytes != tid_filter {
+                continue;
+            }
+        }
+        // Apply predicate via attribute lookups. For now we only support
+        // simple Eq on string columns (the common case for ingest queries
+        // that read fresh writes).
+        if let Some(pred) = &plan.predicate {
+            if !arrow_row_matches(batch, &schema, row_idx, &pred.expr)? {
+                continue;
+            }
+        }
+
+        // Materialize requested fields.
+        let mut row = ResultRow::default();
+        let cols: Vec<&str> = match &plan.projection.columns {
+            Some(cols) => cols.iter().map(|s| s.as_str()).collect(),
+            None => vec![
+                "trace_id",
+                "span_id",
+                "start_time_ms",
+                "end_time_ms",
+                "model",
+                "status",
+                "prompt",
+                "completion",
+            ],
+        };
+        for col_name in cols {
+            let idx = match schema.index_of(col_name) {
+                Ok(i) => i,
+                Err(_) => continue,
+            };
+            let arr = batch.column(idx);
+            if arr.is_null(row_idx) {
+                continue;
+            }
+            let val = if let Some(a) = arr.as_any().downcast_ref::<StringArray>() {
+                serde_json::Value::String(a.value(row_idx).to_string())
+            } else if let Some(a) = arr.as_any().downcast_ref::<Int64Array>() {
+                serde_json::Value::from(a.value(row_idx))
+            } else if let Some(a) = arr.as_any().downcast_ref::<UInt32Array>() {
+                serde_json::Value::from(a.value(row_idx))
+            } else if let Some(a) = arr.as_any().downcast_ref::<UInt64Array>() {
+                serde_json::Value::from(a.value(row_idx))
+            } else if let Some(a) = arr.as_any().downcast_ref::<FixedSizeBinaryArray>() {
+                let b = a.value(row_idx);
+                if b.len() == 16 {
+                    let mut arr16 = [0u8; 16];
+                    arr16.copy_from_slice(b);
+                    serde_json::Value::String(
+                        ulid::Ulid::from(u128::from_be_bytes(arr16)).to_string(),
+                    )
+                } else {
+                    serde_json::json!(b)
+                }
+            } else {
+                continue;
+            };
+            row.fields.insert(col_name.to_string(), val);
+        }
+        out.push(row);
+        if let Some(l) = limit {
+            if out.len() >= l && plan.aggregates.is_empty() && plan.order_by.is_none() {
+                return Ok(());
+            }
+        }
+    }
+    Ok(())
+}
+
+fn arrow_row_matches(
+    batch: &arrow_array::RecordBatch,
+    schema: &arrow_schema::Schema,
+    row_idx: usize,
+    expr: &Expr,
+) -> ZenResult<bool> {
+    use arrow_array::{Array, FixedSizeBinaryArray, Int64Array, StringArray};
+    match expr {
+        Expr::And(a, b) => Ok(arrow_row_matches(batch, schema, row_idx, a)?
+            && arrow_row_matches(batch, schema, row_idx, b)?),
+        Expr::Or(a, b) => Ok(arrow_row_matches(batch, schema, row_idx, a)?
+            || arrow_row_matches(batch, schema, row_idx, b)?),
+        Expr::Not(a) => Ok(!arrow_row_matches(batch, schema, row_idx, a)?),
+        Expr::Eq(left, right) => match (left.as_ref(), right.as_ref()) {
+            (Expr::Column(c), Expr::Literal(Literal::String(v))) => {
+                let i = match schema.index_of(c) {
+                    Ok(i) => i,
+                    Err(_) => return Ok(false),
+                };
+                let arr = batch.column(i);
+                if arr.is_null(row_idx) {
+                    return Ok(false);
+                }
+                if let Some(a) = arr.as_any().downcast_ref::<StringArray>() {
+                    return Ok(a.value(row_idx) == v);
+                }
+                if let Some(a) = arr.as_any().downcast_ref::<FixedSizeBinaryArray>() {
+                    if let Ok(u) = ulid::Ulid::from_string(v) {
+                        let target = u.0.to_be_bytes();
+                        return Ok(a.value(row_idx) == &target[..]);
+                    }
+                }
+                Ok(false)
+            }
+            (Expr::Column(c), Expr::Literal(Literal::Int(v))) => {
+                let i = match schema.index_of(c) {
+                    Ok(i) => i,
+                    Err(_) => return Ok(false),
+                };
+                let arr = batch.column(i);
+                if arr.is_null(row_idx) {
+                    return Ok(false);
+                }
+                if let Some(a) = arr.as_any().downcast_ref::<Int64Array>() {
+                    return Ok(a.value(row_idx) == *v);
+                }
+                Ok(false)
+            }
+            _ => Ok(true), // unsupported pattern; conservative
+        },
+        Expr::TextMatch { column, query } => {
+            let i = match schema.index_of(column) {
+                Ok(i) => i,
+                Err(_) => return Ok(false),
+            };
+            let arr = batch.column(i);
+            if arr.is_null(row_idx) {
+                return Ok(false);
+            }
+            if let Some(a) = arr.as_any().downcast_ref::<StringArray>() {
+                let s = a.value(row_idx);
+                let needle = query.to_lowercase();
+                return Ok(s.to_lowercase().contains(&needle));
+            }
+            Ok(false)
+        }
+        _ => Ok(true), // unsupported predicate types over WAL: conservative pass.
     }
 }

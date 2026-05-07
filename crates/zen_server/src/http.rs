@@ -1,5 +1,6 @@
 //! Wire HTTP routes onto axum.
 
+use axum::extract::DefaultBodyLimit;
 use axum::routing::{get, post};
 use axum::Router;
 
@@ -8,6 +9,10 @@ use crate::ingest::handle_ingest;
 use crate::otlp::handle_otlp_traces;
 use crate::query_handler::handle_query;
 use crate::state::ServerState;
+
+/// 256 MiB — large enough for the Brainstore-style 100 × 100 KB ingest plus
+/// future Arrow-IPC bulk writes.
+const MAX_BODY_BYTES: usize = 256 * 1024 * 1024;
 
 pub fn router(state: ServerState) -> Router {
     Router::new()
@@ -18,6 +23,7 @@ pub fn router(state: ServerState) -> Router {
         .route("/v1/compact", post(handle_compact))
         .route("/v1/compact-full", post(handle_compact_full))
         .route("/v1/segments", get(handle_segments))
+        .layer(DefaultBodyLimit::max(MAX_BODY_BYTES))
         .with_state(state)
 }
 
