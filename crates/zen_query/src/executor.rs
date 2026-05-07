@@ -572,13 +572,15 @@ async fn count_one_segment(
     store: Arc<dyn BlobStore>,
     seg_cache: &SegmentCache,
     plan: &LogicalPlan,
-) -> ZenResult<(std::collections::HashMap<Vec<String>, i64>, ResultStats)> {
+) -> ZenResult<(ahash::AHashMap<Vec<String>, i64>, ResultStats)> {
     use zen_format::{ColumnValues, RowValue};
     let extras = seg_cache.get_or_load(&seg.object_key, store).await?;
     let reader = &extras.reader;
 
-    let mut counts: std::collections::HashMap<Vec<String>, i64> =
-        std::collections::HashMap::with_capacity(64);
+    // ahash is significantly faster than the default SipHash for the small,
+    // numeric or short-string keys we hit in aggregations (3-5× hash throughput).
+    let mut counts: ahash::AHashMap<Vec<String>, i64> =
+        ahash::AHashMap::with_capacity(64);
     let mut stats = ResultStats::default();
 
     for rg_idx in 0..reader.row_group_count() {
@@ -638,8 +640,8 @@ async fn count_one_segment(
             let view = reader.open_page(rg_idx, cols[0])?;
             if let PageView::Dict(dec) = view {
                 // For each row in mask, look up dict key (u32 → u32 counter).
-                let mut local: std::collections::HashMap<u32, i64> =
-                    std::collections::HashMap::with_capacity(dec.dict.len());
+                let mut local: ahash::AHashMap<u32, i64> =
+                    ahash::AHashMap::with_capacity(dec.dict.len());
                 for r in mask.iter() {
                     let r = r as usize;
                     let k = dec.keys[r];
