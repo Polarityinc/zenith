@@ -16,8 +16,10 @@ use zen_index::PostingMap;
 use zen_storage::BlobStore;
 
 /// Cached segment data: parsed reader plus lazy posting-map / FTS / JSON-path
-/// caches. Without these, every query pays the cost of deserializing and (in
-/// the FTS case) reopening Tantivy indexes against the inline blob.
+/// caches. Per-segment caches are bounded by row-group count (small N).
+/// Per-(rg, query) result caches are bounded by `MAX_RESULT_ENTRIES` so that
+/// adversarial query streams can't grow them unboundedly. Limits are
+/// generous (32K entries) to keep eviction rare.
 pub struct SegmentExtras {
     pub reader: Arc<SegmentReader>,
     postings: RwLock<HashMap<(u32, u32), Arc<PostingMap>>>,
@@ -26,6 +28,23 @@ pub struct SegmentExtras {
     jsonpath: RwLock<HashMap<u32, Arc<zen_jsonpath::JsonPathIndex>>>,
     fts_results: RwLock<HashMap<(u32, u64, u64), Arc<RoaringBitmap>>>,
     jsonpath_results: RwLock<HashMap<(u32, u64, u64), Arc<RoaringBitmap>>>,
+}
+
+const MAX_RESULT_ENTRIES: usize = 32_768;
+
+fn cap_insert<K: Eq + std::hash::Hash + Clone, V>(
+    map: &RwLock<HashMap<K, V>>,
+    k: K,
+    v: V,
+) {
+    let mut g = map.write();
+    if g.len() >= MAX_RESULT_ENTRIES {
+        // Drop one arbitrary key (cheap; we don't need true LRU here).
+        if let Some(evict) = g.keys().next().cloned() {
+            g.remove(&evict);
+        }
+    }
+    g.insert(k, v);
 }
 
 impl SegmentExtras {
@@ -87,7 +106,7 @@ impl SegmentExtras {
         };
         let bm = handle.search_to_bitmap(&q).ok()?;
         let bm = Arc::new(bm);
-        self.fts_results.write().insert(key, bm.clone());
+        cap_insert(&self.fts_results, key, bm.clone());
         Some(bm)
     }
 
@@ -135,7 +154,7 @@ impl SegmentExtras {
         }
         let bm = idx.lookup(path, value).cloned().unwrap_or_default();
         let bm = Arc::new(bm);
-        self.jsonpath_results.write().insert(key, bm.clone());
+        cap_insert(&self.jsonpath_results, key, bm.clone());
         Some(bm)
     }
 
@@ -181,9 +200,7 @@ impl SegmentExtras {
             .map(|pl| pl.bitmap.clone())
             .unwrap_or_default();
         let bm = Arc::new(bm);
-        self.posting_results
-            .write()
-            .insert((rg_idx, column_idx, h), bm.clone());
+        cap_insert(&self.posting_results, (rg_idx, column_idx, h), bm.clone());
         Some(bm)
     }
 }
