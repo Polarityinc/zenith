@@ -7,5 +7,5 @@ pub mod build;
 pub mod runner;
 
 pub use merge::{merge_wals, MergedRows};
-pub use build::{build_segment_from_rows, BuildOptions};
+pub use build::{build_segment_from_iter, build_segment_from_rows, BuildOptions};
 pub use runner::{compact_full, compact_partition, CompactionStats};
