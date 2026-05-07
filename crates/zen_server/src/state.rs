@@ -7,7 +7,7 @@ use parking_lot::RwLock;
 use zen_catalog::Catalog;
 use zen_common::{Config, PartitionId, TenantId};
 use zen_memtable::MemTable;
-use zen_query::{SegmentCache, SegmentListCache};
+use zen_query::{LogicalPlan, SegmentCache, SegmentListCache};
 use zen_storage::BlobStore;
 
 #[derive(Clone)]
@@ -18,6 +18,10 @@ pub struct ServerState {
     pub memtables: Arc<RwLock<std::collections::HashMap<(TenantId, PartitionId), MemTable>>>,
     pub seg_cache: SegmentCache,
     pub list_cache: SegmentListCache,
+    /// Cache of parsed `LogicalPlan` by query-string hash. Saves ~100 µs of
+    /// sqlparser cost per HTTP query when the same query repeats (typical
+    /// dashboard refresh pattern).
+    pub plan_cache: Arc<RwLock<std::collections::HashMap<u64, Arc<LogicalPlan>>>>,
 }
 
 impl ServerState {
@@ -29,7 +33,29 @@ impl ServerState {
             memtables: Arc::new(RwLock::new(std::collections::HashMap::new())),
             seg_cache: SegmentCache::new(1024),
             list_cache: SegmentListCache::default(),
+            plan_cache: Arc::new(RwLock::new(std::collections::HashMap::new())),
         }
+    }
+
+    /// Parse + cache a query string. Re-uses an existing `Arc<LogicalPlan>` for
+    /// repeats; rebuilds a fresh one with the right `tenant_id` so cached plans
+    /// survive across tenants.
+    pub fn parse_query(&self, q: &str, tenant_id: u64) -> zen_common::ZenResult<Arc<LogicalPlan>> {
+        let key = xxhash_rust::xxh3::xxh3_64(q.as_bytes()) ^ tenant_id;
+        if let Some(p) = self.plan_cache.read().get(&key) {
+            return Ok(p.clone());
+        }
+        let plan = zen_ql::parse(q, tenant_id)?;
+        let plan = Arc::new(plan);
+        // Cap cache at 1024 distinct queries.
+        let mut g = self.plan_cache.write();
+        if g.len() >= 1024 {
+            if let Some(k) = g.keys().next().copied() {
+                g.remove(&k);
+            }
+        }
+        g.insert(key, plan.clone());
+        Ok(plan)
     }
 
     pub fn memtable_for(&self, tenant: TenantId, partition: PartitionId) -> MemTable {

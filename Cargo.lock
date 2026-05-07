@@ -5679,6 +5679,7 @@ dependencies = [
  "tracing-subscriber",
  "ulid",
  "uuid",
+ "xxhash-rust",
  "zen_catalog",
  "zen_common",
  "zen_compactor",

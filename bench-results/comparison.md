@@ -1,15 +1,15 @@
 # ZenithDB vs PostgreSQL vs DuckDB — Mac M4 Pro
 
-Workload: 100112 spans (tenant 0). Iterations per cell: 50.
+Workload: 100112 spans (tenant 0). Iterations per cell: 100.
 Postgres has covering btree on (model, status) and a GIN trigram on prompt; DuckDB is in-memory. ZenithDB is hot (segment + zone maps cached).
 
 | Query | Zenith p50/p95 µs | Postgres p50/p95 µs | DuckDB p50/p95 µs | Zenith vs Postgres | Zenith vs DuckDB |
 |---|---:|---:|---:|---:|---:|
-| B1_trace_load | 640 / 942 | 9424 / 11176 | 502 / 709 | 11.87× faster | 0.75× faster |
-| B2_attr_filter | 783 / 998 | 203 / 274 | 180 / 263 | 0.27× faster | 0.26× faster |
-| B3_fts_memory | 669 / 795 | 406 / 487 | 123 / 218 | 0.61× faster | 0.27× faster |
-| B6_jsonpath | 574 / 766 | 87 / 186 | 301 / 1468 | 0.24× faster | 1.92× faster |
-| B8_group_by_model | 1653 / 2160 | 4256 / 6836 | 2270 / 3668 | 3.17× faster | 1.70× faster |
+| B1_trace_load | 493 / 601 | 7736 / 9665 | 562 / 850 | 16.09× faster | 1.42× faster |
+| B2_attr_filter | 655 / 855 | 189 / 229 | 172 / 214 | 0.27× faster | 0.25× faster |
+| B3_fts_memory | 627 / 813 | 419 / 1175 | 129 / 220 | 1.45× faster | 0.27× faster |
+| B6_jsonpath | 558 / 698 | 80 / 94 | 285 / 318 | 0.14× faster | 0.46× faster |
+| B8_group_by_model | 1411 / 1591 | 3921 / 6604 | 2052 / 3483 | 4.15× faster | 2.19× faster |
 
 ## Caveats
 
