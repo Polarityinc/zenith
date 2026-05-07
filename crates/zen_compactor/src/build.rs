@@ -112,18 +112,88 @@ pub fn build_segment_from_rows(
             let bytes = pm
                 .serialize()
                 .map_err(|e| ZenError::compactor(format!("posting serialize: {e}")))?;
-            // Posting offset is absolute in the segment file. We don't yet know
-            // where inline_indexes will land in the segment; we'll patch that up
-            // in `set_inline_indexes` callers. For now we record offset relative
-            // to inline_indexes start, and mark with a sentinel that the executor
-            // adds the inline-indexes base later.
             let local_off = inline_indexes.len() as u64;
             let len = bytes.len() as u32;
             inline_indexes.extend_from_slice(&bytes);
-            // Patch the matching ColumnHotcacheEntry.
             if let Some(entry) = zone_maps.iter_mut().find(|c| c.column_idx == *col_idx) {
                 entry.posting_offset = Some(local_off);
                 entry.posting_length = Some(len);
+            }
+        }
+
+        // Build a Tantivy FTS index spanning prompt + completion + tool_io_text.
+        // We index ALL three text columns into one inline blob and record the
+        // offset/length on each text column's hotcache entry so the executor
+        // can find it from any of them.
+        let fts_field_names = ["prompt", "completion", "tool_io_text"];
+        let fts_col_indices: Vec<u32> = fts_field_names
+            .iter()
+            .filter_map(|n| {
+                schema
+                    .columns
+                    .iter()
+                    .position(|c| c.name == *n)
+                    .map(|i| i as u32)
+            })
+            .collect();
+        if !fts_col_indices.is_empty() {
+            let opts = zen_fts::BuildOptions {
+                field_names: fts_field_names.iter().map(|s| s.to_string()).collect(),
+                writer_memory_bytes: 15_000_000,
+            };
+            let accessor = SpanFieldAccessor { rows: chunk };
+            let res = zen_fts::build_fts_index(&accessor, &opts).map_err(|e| {
+                ZenError::compactor(format!("fts build: {e}"))
+            })?;
+            let local_off = inline_indexes.len() as u64;
+            let len = res.blob.len() as u32;
+            inline_indexes.extend_from_slice(&res.blob);
+            for ci in &fts_col_indices {
+                if let Some(entry) = zone_maps.iter_mut().find(|c| c.column_idx == *ci) {
+                    entry.fts_offset = Some(local_off);
+                    entry.fts_length = Some(len);
+                }
+            }
+        }
+
+        // Build per-segment JSON-path index for the metadata column.
+        if let Some(meta_col_idx) = schema
+            .columns
+            .iter()
+            .position(|c| c.name == "metadata")
+            .map(|i| i as u32)
+        {
+            let json_values: Vec<serde_json::Value> = chunk
+                .iter()
+                .filter_map(|r| r.metadata.clone())
+                .collect();
+            // Discover paths from the sample.
+            let cfg = zen_jsonpath::DiscoveryConfig {
+                sample_size: 10_000,
+                min_presence_pct: 1.0,
+                max_paths: 256,
+                max_depth: 6,
+            };
+            let discovered = zen_jsonpath::discover_paths(json_values.iter(), &cfg);
+            let paths: Vec<String> = discovered.into_iter().map(|p| p.path).collect();
+            if !paths.is_empty() {
+                let mut builder = zen_jsonpath::JsonPathIndexBuilder::new(paths);
+                for (row_idx, r) in chunk.iter().enumerate() {
+                    if let Some(v) = &r.metadata {
+                        builder.push_row(row_idx as u32, v);
+                    }
+                }
+                let idx = builder.finish();
+                let bytes = idx
+                    .serialize()
+                    .map_err(|e| ZenError::compactor(format!("jsonpath serialize: {e}")))?;
+                let local_off = inline_indexes.len() as u64;
+                let len = bytes.len() as u32;
+                inline_indexes.extend_from_slice(&bytes);
+                if let Some(entry) = zone_maps.iter_mut().find(|c| c.column_idx == meta_col_idx) {
+                    entry.jsonpath_offset = Some(local_off);
+                    entry.jsonpath_length = Some(len);
+                }
             }
         }
 
@@ -426,4 +496,25 @@ fn build_posting_for_column(rows: &[SpanRecord], column: &str) -> PostingMap {
         pm.insert(v.as_bytes(), i as u32);
     }
     pm
+}
+
+/// Implements `zen_fts::FieldAccessor` over a slice of `SpanRecord` for the
+/// columns: `prompt`, `completion`, `tool_io_text` (in that order).
+struct SpanFieldAccessor<'a> {
+    rows: &'a [SpanRecord],
+}
+
+impl<'a> zen_fts::build::FieldAccessor for SpanFieldAccessor<'a> {
+    fn field(&self, row: usize, field_idx: usize) -> Option<&str> {
+        let r = self.rows.get(row)?;
+        match field_idx {
+            0 => r.prompt.as_deref(),
+            1 => r.completion.as_deref(),
+            2 => r.tool_io_text.as_deref(),
+            _ => None,
+        }
+    }
+    fn row_count(&self) -> usize {
+        self.rows.len()
+    }
 }
