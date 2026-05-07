@@ -31,6 +31,7 @@ futures = { workspace = true }
 tokio-stream = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
+simd-json = { workspace = true }
 prost = { workspace = true }
 bytes = { workspace = true }
 ulid = { workspace = true }
