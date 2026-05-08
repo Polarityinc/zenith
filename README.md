@@ -9,11 +9,11 @@
 </p>
 
 <p align="center">
-  <a href="https://github.com/polarity-cc/zenithdb/actions/workflows/ci.yml"><img src="https://github.com/polarity-cc/zenithdb/actions/workflows/ci.yml/badge.svg" alt="CI" /></a>
+  <a href="https://github.com/Polarityinc/zenith/actions/workflows/ci.yml"><img src="https://github.com/Polarityinc/zenith/actions/workflows/ci.yml/badge.svg" alt="CI" /></a>
   <a href="LICENSE"><img src="https://img.shields.io/badge/license-Apache%202.0-blue.svg" alt="License: Apache 2.0" /></a>
-  <a href="https://github.com/polarity-cc/zenithdb/blob/main/rust-toolchain.toml"><img src="https://img.shields.io/badge/rust-1.87%2B-orange.svg" alt="Rust 1.87+" /></a>
+  <a href="https://github.com/Polarityinc/zenith/blob/main/rust-toolchain.toml"><img src="https://img.shields.io/badge/rust-1.87%2B-orange.svg" alt="Rust 1.87+" /></a>
   <a href="CHANGELOG.md"><img src="https://img.shields.io/badge/status-alpha-yellow.svg" alt="Status: alpha" /></a>
-  <a href="https://github.com/polarity-cc/zenithdb/issues"><img src="https://img.shields.io/github/issues/polarity-cc/zenithdb.svg" alt="Issues" /></a>
+  <a href="https://github.com/Polarityinc/zenith/issues"><img src="https://img.shields.io/github/issues/Polarityinc/zenith.svg" alt="Issues" /></a>
 </p>
 
 <p align="center">
@@ -49,7 +49,7 @@ Everything else is supporting infrastructure.
 - **Vector search** — HNSW + optional quantization, OpenAI/Anthropic embedding sizes out of the box.
 - **JSON-path indexing** — bitmap posting lists over the hottest paths, sampled per segment.
 - **Compression** — FSST + ZSTD on strings, Gorilla XOR on floats, FoR/RLE on integers, dictionary on low-card columns.
-- **Storage backends** — local FS, S3, GCS, Azure Blob; SQLite or Postgres catalog.
+- **Storage backends** — local FS, S3, GCS, Azure Blob; PostgreSQL catalog (with `MockCatalog` in-memory backend for tests).
 - **Ops, day one** — JWT auth, TLS termination (rustls + aws-lc-rs), Prometheus metrics, OTLP tracing, per-tenant rate limits, graceful shutdown, snapshot/restore CLI.
 - **Encryption at rest** — AES-256-GCM envelope encryption, pluggable KMS root key.
 - **Cluster** — rendezvous-hash sharded, transparent query routing, 3-node integration test in CI.
@@ -64,11 +64,11 @@ Everything else is supporting infrastructure.
 ### Run a server (zero config)
 
 ```bash
-git clone https://github.com/polarity-cc/zenithdb.git
+git clone https://github.com/Polarityinc/zenith.git
 cd zenithdb
 cargo build --release
 
-# Default profile: SQLite catalog + local-FS object store. No Docker required.
+# Default profile: in-memory `MockCatalog` + local-FS object store. No Docker required.
 cargo run --release -p zen_cli -- serve --config examples/zenithdb.dev.toml
 ```
 
@@ -99,7 +99,7 @@ curl -s 'localhost:8080/v1/query' -H 'content-type: application/json' -d '{
 ```bash
 docker run --rm -p 8080:8080 -p 50051:50051 \
   -v $(pwd)/data:/var/lib/zenith \
-  ghcr.io/polarity-cc/zenithdb:latest
+  ghcr.io/Polarityinc/zenith:latest
 ```
 
 ### Production-like local stack (Postgres + MinIO)
@@ -135,7 +135,7 @@ Clients (SDKs, OTLP, REST, gRPC)
    (memtable)   (planner + exec)
         │           │
         ▼           ▼
-   Catalog (sqlite / Postgres)
+   Catalog (Postgres)
         │
         ▼
   Object storage (local-fs / S3 / GCS / Azure)
@@ -177,7 +177,7 @@ ZenithDB ships with the operational primitives needed to run on real infrastruct
 
 The default profile runs entirely on your laptop with no external services:
 
-- **Catalog** — SQLite at `./data/zenith.db`
+- **Catalog** — Postgres (production) or in-memory `MockCatalog` (dev/test, set in config)
 - **Object store** — local filesystem at `./data/blobs/`
 - **NVMe page cache** — in-process, default 4 GiB
 
@@ -198,8 +198,8 @@ ZenithDB is **alpha**. The core engine is feature-complete and runs the full ben
 
 ## Community
 
-- **Issues & feature requests** — [GitHub Issues](https://github.com/polarity-cc/zenithdb/issues)
-- **Discussions** — [GitHub Discussions](https://github.com/polarity-cc/zenithdb/discussions)
+- **Issues & feature requests** — [GitHub Issues](https://github.com/Polarityinc/zenith/issues)
+- **Discussions** — [GitHub Discussions](https://github.com/Polarityinc/zenith/discussions)
 - **Security disclosures** — see [SECURITY.md](SECURITY.md)
 - **Contact** — [support@polarity.cc](mailto:support@polarity.cc)
 

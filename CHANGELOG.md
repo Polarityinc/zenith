@@ -5,6 +5,52 @@ versioning: [SemVer](https://semver.org/).
 
 ## [Unreleased]
 
+### Catalog: Postgres-only (2026-05-08)
+
+#### Removed
+
+- **`SqliteCatalog`** and the entire `migrations/sqlite/` directory.
+  SQLite was the original dev backend; it does not survive cluster
+  scale-up (single-writer, no replication, no failover) and was the
+  source of confusion about what to deploy in production.
+
+#### Added
+
+- **`PostgresCatalog`** (`crates/zen_catalog/src/postgres.rs`) is now
+  the production backend. Migrations live in `migrations/postgres/`
+  with Postgres-native types (BYTEA, BIGINT, TIMESTAMPTZ).
+  `next_commit_id` uses `INSERT … ON CONFLICT DO UPDATE … RETURNING`
+  to serialize concurrent writers through one row lock.
+- **`MockCatalog`** (`crates/zen_catalog/src/mock.rs`) — in-memory,
+  no SQL, for tests + benches. Same `Catalog` trait, same semantics
+  (monotonic commit-id allocation, tenant-scoped supersede, lease
+  TTL). Replaces `SqliteCatalog::open_in_memory()` everywhere.
+
+#### Changed
+
+- `CatalogConfig`: `backend` defaults to `"mock"`; `sqlite_path` field
+  removed; `postgres_url` required when `backend = "postgres"`.
+- `Cargo.toml`: workspace `sqlx` switched to `postgres + tls-rustls-aws-lc-rs`
+  features; `sqlite` feature dropped from `zen_catalog`.
+- `examples/zenithdb.dev.toml`: defaults to `backend = "mock"`; the
+  Postgres URL is shown as a commented-out hint with `CHANGEME` literal.
+- README, RUNBOOK, SCALING docs scrubbed of "sqlite single-node"
+  language. Production posture is "Postgres always".
+
+#### Migration
+
+If you were running on SQLite locally, switch to either:
+
+1. **Mock backend** for ephemeral dev: `backend = "mock"` (no setup,
+   data lost on restart).
+2. **Real Postgres** via the dev compose stack: `docker compose -f
+   deploy/docker/docker-compose.dev.yml up -d` and set
+   `backend = "postgres"` + `postgres_url`.
+
+There is **no automatic migration** from a SQLite catalog file to
+Postgres — operators with persistent SQLite data should export it
+manually before upgrading.
+
 ### Production-readiness sprint (2026-05-07)
 
 #### Added

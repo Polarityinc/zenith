@@ -20,14 +20,15 @@ use zen_storage::BlobStore;
 /// Per-(rg, query) result caches are bounded by `MAX_RESULT_ENTRIES` so that
 /// adversarial query streams can't grow them unboundedly. Limits are
 /// generous (32K entries) to keep eviction rare.
+type ResultCache = RwLock<HashMap<(u32, u64, u64, usize), Arc<RoaringBitmap>>>;
 pub struct SegmentExtras {
     pub reader: Arc<SegmentReader>,
     postings: RwLock<HashMap<(u32, u32), Arc<PostingMap>>>,
     posting_results: RwLock<HashMap<(u32, u32, u64), Arc<RoaringBitmap>>>,
     fts: RwLock<HashMap<u32, Arc<zen_fts::FtsHandle>>>,
     jsonpath: RwLock<HashMap<u32, Arc<zen_jsonpath::JsonPathIndex>>>,
-    fts_results: RwLock<HashMap<(u32, u64, u64, usize), Arc<RoaringBitmap>>>,
-    jsonpath_results: RwLock<HashMap<(u32, u64, u64, usize), Arc<RoaringBitmap>>>,
+    fts_results: ResultCache,
+    jsonpath_results: ResultCache,
 }
 
 const MAX_RESULT_ENTRIES: usize = 32_768;

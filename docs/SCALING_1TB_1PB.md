@@ -253,7 +253,7 @@ lets us:
 └───────────────┬──────────────────────────────────────────┘
                 │
 ┌───────────────▼──────────────────────────────────────────┐
-│ Catalog (Postgres at PB scale; sqlite single-node)        │
+│ Catalog (Postgres at PB scale; MockCatalog (in-memory; not for production))        │
 │  - tenants, partitions, segments, wal_objects, leases     │
 │  - nodes (with last_heartbeat_ms)                         │
 └───────────────┬──────────────────────────────────────────┘
@@ -309,7 +309,7 @@ Properties (vs ClickHouse's manual `Distributed` shard map):
   `ShardMap` (HRW), `QueryRouter`, `RemoteClient`, `merge_result_sets`.
   14 unit tests.
 - ✅ `nodes` table in `zen_catalog`; `upsert_node` / `list_nodes`
-  trait methods on `Catalog`. Sqlite implementation + Postgres
+  trait methods on `Catalog`. Postgres production impl + `MockCatalog` test impl
   implementation (the latter behind `catalog-postgres`).
 - ✅ `ServerState::with_cluster(NodeRegistry)` — cluster mode is opt-in.
 - ✅ `POST /v1/internal/query` — node-to-node endpoint that bypasses
@@ -340,8 +340,8 @@ Rough sizing for the cluster, derived from the per-segment cost model.
 
 | Corpus | Nodes | RAM / node | Segment cache hit | Notes |
 |---|---:|---:|---:|---|
-| 1 GB | 1 | 8 GB | 100 % | Single-node sqlite, default config |
-| 100 GB | 1 | 32 GB | 100 % | Still single-node; sqlite catalog OK |
+| 1 GB | 1 | 8 GB | 100 % | Postgres (cloud-managed) is the production catalog at every scale |
+| 100 GB | 1 | 32 GB | 100 % | Still single-node; one Postgres instance with PITR |
 | 1 TB | 3 | 64 GB | ~95 % | Postgres catalog, replication=2, S3 storage |
 | 10 TB | 8–12 | 64 GB | ~80 % | Coordinator + worker split optional |
 | 100 TB | 32–64 | 64 GB | ~50 % | Coordinator/worker/compactor pool split |

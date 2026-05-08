@@ -12,10 +12,12 @@ nvme_cache_dir = "./data/cache"
 nvme_cache_bytes = 4_294_967_296   # 4 GiB
 
 [catalog]
-# "sqlite" | "postgres"
-backend = "sqlite"
-sqlite_path = "./data/zenith.db"
-# postgres_url = "postgres://zen:zen@localhost:5432/zenith"
+# "postgres" (production) | "mock" (in-memory; dev/test only — does not
+# survive restart). To run the dev compose stack:
+#   docker compose -f deploy/docker/docker-compose.dev.yml up -d
+#   then set `backend = "postgres"` and the URL below.
+backend = "mock"
+# postgres_url = "postgres://zen:CHANGEME@localhost:5432/zenith"
 
 [ingest]
 flush_interval_ms = 100

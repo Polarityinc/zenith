@@ -44,7 +44,7 @@ cargo install --locked cargo-audit cargo-deny cargo-nextest
 ### Clone and bootstrap
 
 ```bash
-git clone https://github.com/polarity-cc/zenithdb.git
+git clone https://github.com/Polarityinc/zenith.git
 cd zenithdb
 cargo build --workspace
 ```
@@ -210,7 +210,7 @@ Use a real name and the email on your GitHub account.
 
 ## Reporting issues
 
-For bugs and feature requests, please use [GitHub Issues](https://github.com/polarity-cc/zenithdb/issues) with the appropriate template. A good bug report includes:
+For bugs and feature requests, please use [GitHub Issues](https://github.com/Polarityinc/zenith/issues) with the appropriate template. A good bug report includes:
 
 - ZenithDB version (`zen --version`) and git SHA if building from source.
 - OS / arch.
@@ -219,7 +219,7 @@ For bugs and feature requests, please use [GitHub Issues](https://github.com/pol
 - Logs at `RUST_LOG=zen=debug` if relevant.
 - What you expected vs. what happened.
 
-For questions and design discussion, use [GitHub Discussions](https://github.com/polarity-cc/zenithdb/discussions).
+For questions and design discussion, use [GitHub Discussions](https://github.com/Polarityinc/zenith/discussions).
 
 ## Security
 

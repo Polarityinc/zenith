@@ -6,7 +6,7 @@ use chrono::Utc;
 use tokio::net::TcpListener;
 use uuid::Uuid;
 
-use zen_catalog::{model::WalObjectRow, Catalog, SqliteCatalog};
+use zen_catalog::{model::WalObjectRow, Catalog, MockCatalog};
 use zen_common::{
     CommitId, Config, PartitionId, Schema, SchemaFingerprint, SpanId, SpanRecord, TenantId, TraceId,
 };
@@ -21,7 +21,7 @@ async fn metrics_endpoint_renders_query_observations() {
     zen_server::metrics::init();
 
     let store: Arc<dyn BlobStore> = Arc::new(InMemoryStore::default());
-    let catalog: Arc<dyn Catalog> = Arc::new(SqliteCatalog::open_in_memory().await.unwrap());
+    let catalog: Arc<dyn Catalog> = Arc::new(MockCatalog::new());
     catalog.ensure_tenant(TenantId(1), "t").await.unwrap();
     catalog
         .ensure_partition(TenantId(1), PartitionId(0))

@@ -8,7 +8,7 @@ the engine; for that, read the per-crate doc comments and `docs/SCALING_1TB_1PB.
 
 Zenith is a storage-disaggregated columnar database for AI agent traces:
 
-- **Catalog** (Postgres in production, sqlite for single-node) holds metadata:
+- **Catalog** (Postgres only, with `MockCatalog` for tests) holds metadata:
   segment manifests, WAL pointers, commit IDs, compaction leases, cluster
   node registry.
 - **Object store** (S3 / GCS / Azure / local FS) holds the immutable data:
@@ -209,7 +209,7 @@ Symptom: `zen_wal_lag_bytes` climbing. Reasons:
 
 ### "Disk full"
 
-Typical when running in a single-node sqlite + local-FS deployment
+Typical when running in a single-node `MockCatalog` + local-FS dev deployment
 without rotation. Inspect:
 
 - `du -sh data/blobs` for raw size

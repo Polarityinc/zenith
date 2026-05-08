@@ -673,7 +673,7 @@ mod tests {
     use ulid::Ulid;
     use uuid::Uuid;
 
-    use zen_catalog::{model::WalObjectRow, SqliteCatalog};
+    use zen_catalog::{model::WalObjectRow, MockCatalog};
     use zen_common::{Schema, SchemaFingerprint, SpanId, SpanRecord, TraceId};
     use zen_memtable::flush_to_record_batch;
     use zen_storage::local_fs::InMemoryStore;
@@ -684,7 +684,7 @@ mod tests {
     #[tokio::test]
     async fn end_to_end_compaction_trace_locality() {
         let store: Arc<dyn BlobStore> = Arc::new(InMemoryStore::default());
-        let catalog: Arc<dyn Catalog> = Arc::new(SqliteCatalog::open_in_memory().await.unwrap());
+        let catalog: Arc<dyn Catalog> = Arc::new(MockCatalog::new());
         catalog.ensure_tenant(TenantId(1), "t").await.unwrap();
         catalog
             .ensure_partition(TenantId(1), PartitionId(0))
@@ -790,7 +790,7 @@ mod tests {
     #[tokio::test]
     async fn empty_compaction_idempotent() {
         let store: Arc<dyn BlobStore> = Arc::new(InMemoryStore::default());
-        let catalog: Arc<dyn Catalog> = Arc::new(SqliteCatalog::open_in_memory().await.unwrap());
+        let catalog: Arc<dyn Catalog> = Arc::new(MockCatalog::new());
         catalog.ensure_tenant(TenantId(1), "t").await.unwrap();
         catalog
             .ensure_partition(TenantId(1), PartitionId(0))
