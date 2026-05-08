@@ -9,11 +9,11 @@
 </p>
 
 <p align="center">
-  <a href="https://github.com/polarity-cc/zenithdb/actions/workflows/ci.yml"><img src="https://github.com/polarity-cc/zenithdb/actions/workflows/ci.yml/badge.svg" alt="CI" /></a>
+  <a href="https://github.com/Polarityinc/zenith/actions/workflows/ci.yml"><img src="https://github.com/Polarityinc/zenith/actions/workflows/ci.yml/badge.svg" alt="CI" /></a>
   <a href="LICENSE"><img src="https://img.shields.io/badge/license-Apache%202.0-blue.svg" alt="License: Apache 2.0" /></a>
-  <a href="https://github.com/polarity-cc/zenithdb/blob/main/rust-toolchain.toml"><img src="https://img.shields.io/badge/rust-1.87%2B-orange.svg" alt="Rust 1.87+" /></a>
+  <a href="https://github.com/Polarityinc/zenith/blob/main/rust-toolchain.toml"><img src="https://img.shields.io/badge/rust-1.87%2B-orange.svg" alt="Rust 1.87+" /></a>
   <a href="CHANGELOG.md"><img src="https://img.shields.io/badge/status-alpha-yellow.svg" alt="Status: alpha" /></a>
-  <a href="https://github.com/polarity-cc/zenithdb/issues"><img src="https://img.shields.io/github/issues/polarity-cc/zenithdb.svg" alt="Issues" /></a>
+  <a href="https://github.com/Polarityinc/zenith/issues"><img src="https://img.shields.io/github/issues/Polarityinc/zenith.svg" alt="Issues" /></a>
 </p>
 
 <p align="center">
@@ -64,7 +64,7 @@ Everything else is supporting infrastructure.
 ### Run a server (zero config)
 
 ```bash
-git clone https://github.com/polarity-cc/zenithdb.git
+git clone https://github.com/Polarityinc/zenith.git
 cd zenithdb
 cargo build --release
 
@@ -99,7 +99,7 @@ curl -s 'localhost:8080/v1/query' -H 'content-type: application/json' -d '{
 ```bash
 docker run --rm -p 8080:8080 -p 50051:50051 \
   -v $(pwd)/data:/var/lib/zenith \
-  ghcr.io/polarity-cc/zenithdb:latest
+  ghcr.io/Polarityinc/zenith:latest
 ```
 
 ### Production-like local stack (Postgres + MinIO)
@@ -198,8 +198,8 @@ ZenithDB is **alpha**. The core engine is feature-complete and runs the full ben
 
 ## Community
 
-- **Issues & feature requests** — [GitHub Issues](https://github.com/polarity-cc/zenithdb/issues)
-- **Discussions** — [GitHub Discussions](https://github.com/polarity-cc/zenithdb/discussions)
+- **Issues & feature requests** — [GitHub Issues](https://github.com/Polarityinc/zenith/issues)
+- **Discussions** — [GitHub Discussions](https://github.com/Polarityinc/zenith/discussions)
 - **Security disclosures** — see [SECURITY.md](SECURITY.md)
 - **Contact** — [support@polarity.cc](mailto:support@polarity.cc)
 

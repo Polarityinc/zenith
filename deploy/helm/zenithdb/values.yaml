@@ -1,5 +1,5 @@
 image:
-  repository: ghcr.io/polarity-cc/zenithdb
+  repository: ghcr.io/Polarityinc/zenith
   tag: latest
   pullPolicy: IfNotPresent
 

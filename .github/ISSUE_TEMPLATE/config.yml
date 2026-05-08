@@ -1,8 +1,8 @@
 blank_issues_enabled: false
 contact_links:
   - name: Questions & discussion
-    url: https://github.com/polarity-cc/zenithdb/discussions
+    url: https://github.com/Polarityinc/zenith/discussions
     about: Have a question or want to discuss a design? Start a discussion.
   - name: Security vulnerability
-    url: https://github.com/polarity-cc/zenithdb/security/advisories/new
+    url: https://github.com/Polarityinc/zenith/security/advisories/new
     about: Please report security issues privately. Do not open a public issue.
