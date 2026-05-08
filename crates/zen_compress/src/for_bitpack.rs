@@ -34,7 +34,7 @@ pub fn for_encode(values: &[i64]) -> Bytes {
         64 - max_delta.leading_zeros() as u8
     };
 
-    let mut b = BytesMut::with_capacity(13 + (values.len() * width as usize + 7) / 8);
+    let mut b = BytesMut::with_capacity(13 + (values.len() * width as usize).div_ceil(8));
     b.put_u32_le(values.len() as u32);
     b.put_u8(width);
     b.put_i64_le(frame);
@@ -77,7 +77,7 @@ pub fn for_decompress(input: &[u8]) -> Result<Vec<i64>, ZenError> {
         return Ok(vec![frame; count]);
     }
 
-    let needed_bytes = (count * width as usize + 7) / 8;
+    let needed_bytes = (count * width as usize).div_ceil(8);
     if p.len() < needed_bytes {
         return Err(ZenError::compress("FoR packed area truncated"));
     }

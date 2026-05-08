@@ -22,6 +22,9 @@ members = [
     "crates/zen_server",
     "crates/zen_cli",
     "crates/zen_bench",
+    "crates/zen_cluster",
+    "crates/zen_auth",
+    "crates/zen_crypto",
 ]
 
 [workspace.package]
@@ -52,6 +55,9 @@ zen_query = { path = "crates/zen_query" }
 zen_ql = { path = "crates/zen_ql" }
 zen_server = { path = "crates/zen_server" }
 zen_bench = { path = "crates/zen_bench" }
+zen_cluster = { path = "crates/zen_cluster" }
+zen_auth = { path = "crates/zen_auth" }
+zen_crypto = { path = "crates/zen_crypto" }
 
 # Arrow ecosystem (single major version across the workspace)
 arrow = { version = "53", default-features = false, features = ["prettyprint", "ipc"] }
@@ -122,7 +128,30 @@ crc32fast = "1"
 mimalloc = { version = "0.1", default-features = false }
 
 # Caching
-moka = { version = "0.12", features = ["future"] }
+moka = { version = "0.12", features = ["future", "sync"] }
+
+# Auth / crypto
+jsonwebtoken = "9"
+hmac = "0.12"
+sha2 = "0.10"
+base64 = "0.22"
+subtle = "2.6"
+
+# OpenAPI / SDK
+utoipa = { version = "5", features = ["axum_extras"] }
+
+# TLS
+axum-server = { version = "0.7", features = ["tls-rustls-no-provider"] }
+rustls = { version = "0.23", default-features = false, features = ["aws-lc-rs", "std"] }
+rustls-pemfile = "2"
+
+# Rate limiting / quotas
+governor = "0.7"
+dashmap = "6"
+
+# Encryption at rest (envelope: data key per segment, wrapped by KMS root)
+aes-gcm = "0.10"
+rand_core = { version = "0.6", features = ["std"] }
 
 # Observability
 tracing = "0.1"
@@ -132,6 +161,8 @@ opentelemetry = "0.27"
 opentelemetry-otlp = { version = "0.27", features = ["grpc-tonic", "trace"] }
 opentelemetry_sdk = { version = "0.27", features = ["rt-tokio"] }
 prometheus = "0.13"
+metrics = "0.24"
+metrics-exporter-prometheus = { version = "0.16", default-features = false }
 
 # CLI
 clap = { version = "4", features = ["derive", "env"] }

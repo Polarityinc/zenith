@@ -5,7 +5,6 @@ use tonic::{Request, Response, Status};
 
 use zen_catalog::model::WalObjectRow;
 use zen_common::{CommitId, PartitionId, Schema, SpanId, SpanRecord, TenantId, TraceId};
-use zen_memtable::flush_to_record_batch;
 use zen_proto::v1::{
     ingest_service_server::{IngestService, IngestServiceServer},
     query_service_server::{QueryService, QueryServiceServer},

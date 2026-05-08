@@ -75,6 +75,43 @@ pub async fn handle_health() -> Json<serde_json::Value> {
     Json(serde_json::json!({"status": "ok"}))
 }
 
+/// Liveness probe — process is alive and responsive. Cheap; just confirms
+/// the axum task is reachable and we're not deadlocked. Kubernetes uses
+/// this to decide whether to kill+restart.
+pub async fn handle_healthz() -> Json<serde_json::Value> {
+    Json(serde_json::json!({"status": "ok", "kind": "liveness"}))
+}
+
+/// Readiness probe — should we receive customer traffic? Checks:
+///
+/// - Catalog reachable (tenant 0 lookup succeeds; ~1 ms on sqlite,
+///   <50 ms on a healthy Postgres).
+///
+/// Add more checks here as they become available — segment-cache warm-up,
+/// WAL flush age, etc. Returns 503 on any failure so Kubernetes pulls
+/// the pod from the load-balancer endpoint set.
+pub async fn handle_readyz(
+    State(state): State<ServerState>,
+) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+    state
+        .catalog
+        .ensure_tenant(TenantId(0), "default")
+        .await
+        .map_err(|e| {
+            (
+                StatusCode::SERVICE_UNAVAILABLE,
+                format!("catalog probe failed: {e}"),
+            )
+        })?;
+    Ok(Json(serde_json::json!({
+        "status": "ready",
+        "kind": "readiness",
+        "checks": {
+            "catalog": "ok",
+        }
+    })))
+}
+
 pub async fn handle_segments(
     State(state): State<ServerState>,
     axum::extract::Query(q): axum::extract::Query<SegmentsQuery>,

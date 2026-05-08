@@ -39,7 +39,7 @@ fn bench_posting_intersect(c: &mut Criterion) {
     }
     let pa = PostingList { bitmap: a };
     let pb = PostingList { bitmap: b };
-    group.throughput(Throughput::Elements((pa.cardinality() + pb.cardinality()) as u64));
+    group.throughput(Throughput::Elements(pa.cardinality() + pb.cardinality()));
     group.bench_function("AND_1M_rows", |bb| {
         bb.iter(|| {
             let mut x = pa.clone();

@@ -11,6 +11,7 @@ use serde::{Deserialize, Serialize};
 use crate::errors::{ZenError, ZenResult};
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Default)]
 pub struct Config {
     #[serde(default)]
     pub server: ServerConfig,
@@ -34,20 +35,82 @@ pub struct Config {
     pub vector: VectorConfig,
     #[serde(default)]
     pub telemetry: TelemetryConfig,
+    #[serde(default)]
+    pub auth: AuthConfig,
+    #[serde(default)]
+    pub crypto: CryptoConfig,
+}
+
+/// Encryption-at-rest settings. Default is **off** — segments and WALs
+/// are stored unencrypted (back-compat with existing deployments). Turn
+/// it on by setting `enabled=true` and pointing `root_key_path` at a
+/// 32-byte file (or 64 hex chars) holding the symmetric root key.
+///
+/// In production, the root key should come from a KMS (AWS KMS, GCP
+/// KMS, HashiCorp Vault). Today we ship a `StaticRootKey` from disk;
+/// the `RootKey` trait in `zen_crypto` lets a follow-up plug a KMS
+/// adapter in without touching the wire format.
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+pub struct CryptoConfig {
+    #[serde(default)]
+    pub enabled: bool,
+    /// Path to a file holding the 32-byte root key. Either raw bytes
+    /// (file is exactly 32 bytes long) or 64 hex characters.
+    #[serde(default)]
+    pub root_key_path: String,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct ServerConfig {
     pub listen: String,
     pub http_listen: String,
+    #[serde(default)]
+    pub tls: TlsConfig,
 }
 impl Default for ServerConfig {
     fn default() -> Self {
         Self {
             listen: "0.0.0.0:50051".into(),
             http_listen: "0.0.0.0:8080".into(),
+            tls: TlsConfig::default(),
         }
     }
+}
+
+/// TLS settings for the HTTP / gRPC listeners. Empty `cert_path` means
+/// "serve plain HTTP" — sane for in-VPC deployments behind a TLS-
+/// terminating load balancer (Kong / Envoy / ALB) and required for the
+/// in-process integration tests. Set `cert_path` + `key_path` to enable
+/// rustls termination directly inside the zenithdb process.
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+pub struct TlsConfig {
+    #[serde(default)]
+    pub cert_path: String,
+    #[serde(default)]
+    pub key_path: String,
+    /// Optional path to a CA bundle used to verify client certificates
+    /// when mTLS is required. Empty means client certs aren't required.
+    #[serde(default)]
+    pub client_ca_path: String,
+}
+
+/// Authentication settings. When all fields are empty, auth is **off** —
+/// useful for the dev path and the integration tests but unsafe for any
+/// production deployment. The boot-time validation logs a loud warning
+/// when this happens.
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+pub struct AuthConfig {
+    /// HTTPS URL of the issuing IdP's JWKS document. When set, public
+    /// HTTP endpoints require a `Bearer` JWT signed by one of the keys
+    /// in the document. When empty, JWT verification is **disabled**.
+    #[serde(default)]
+    pub jwks_url: String,
+    /// Shared secret used to authenticate `/v1/internal/*` requests
+    /// between cluster nodes. When empty, internal endpoints are open —
+    /// only safe for single-node deployments. Prefer setting this for
+    /// any cluster, even on a private network.
+    #[serde(default)]
+    pub internal_secret: String,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -134,12 +197,27 @@ impl Default for CompactConfig {
 pub struct QueryConfig {
     pub max_concurrent_queries: u32,
     pub result_cache_max_bytes: u64,
+    /// Per-tenant request budget in QPS. 0 disables rate limiting.
+    #[serde(default = "default_tenant_qps")]
+    pub tenant_qps_limit: u32,
+    /// Burst capacity per tenant — number of requests allowed back-to-back
+    /// before the bucket starts throttling.
+    #[serde(default = "default_tenant_burst")]
+    pub tenant_burst: u32,
+}
+fn default_tenant_qps() -> u32 {
+    100
+}
+fn default_tenant_burst() -> u32 {
+    1000
 }
 impl Default for QueryConfig {
     fn default() -> Self {
         Self {
             max_concurrent_queries: 256,
             result_cache_max_bytes: 1024 * 1024 * 1024,
+            tenant_qps_limit: default_tenant_qps(),
+            tenant_burst: default_tenant_burst(),
         }
     }
 }
@@ -226,23 +304,6 @@ impl Default for TelemetryConfig {
     }
 }
 
-impl Default for Config {
-    fn default() -> Self {
-        Self {
-            server: ServerConfig::default(),
-            storage: StorageConfig::default(),
-            catalog: CatalogConfig::default(),
-            ingest: IngestConfig::default(),
-            compact: CompactConfig::default(),
-            query: QueryConfig::default(),
-            fts: FtsConfig::default(),
-            bitmap_index: BitmapIndexConfig::default(),
-            jsonpath_index: JsonPathIndexConfig::default(),
-            vector: VectorConfig::default(),
-            telemetry: TelemetryConfig::default(),
-        }
-    }
-}
 
 impl Config {
     /// Load from TOML on disk, applying env overrides on top.

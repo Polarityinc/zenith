@@ -2,7 +2,7 @@
 
 use sqlparser::ast::{
     BinaryOperator, Expr as SqlExpr, FunctionArg, FunctionArgExpr, FunctionArguments, GroupByExpr,
-    Query, Select, SelectItem, SetExpr, Statement, TableFactor, Value,
+    Query, SelectItem, SetExpr, Statement, TableFactor, Value,
 };
 use sqlparser::dialect::GenericDialect;
 use sqlparser::parser::Parser;
@@ -86,11 +86,9 @@ fn parse_query(q: &Query, tenant_id: u64) -> Result<LogicalPlan, ZenError> {
     }
 
     // LIMIT.
-    if let Some(SqlExpr::Value(v)) = &q.limit {
-        if let Value::Number(n, _) = v {
-            if let Ok(parsed) = n.parse::<u32>() {
-                plan.limit = Some(parsed);
-            }
+    if let Some(SqlExpr::Value(Value::Number(n, _))) = &q.limit {
+        if let Ok(parsed) = n.parse::<u32>() {
+            plan.limit = Some(parsed);
         }
     }
     Ok(plan)
@@ -192,10 +190,8 @@ fn arg_col_and_float(args: &FunctionArguments) -> (Option<String>, Option<f64>) 
                         col = Some(id.value.clone());
                     }
                 } else if i == 1 {
-                    if let SqlExpr::Value(v) = e {
-                        if let Value::Number(n, _) = v {
-                            q = n.parse::<f64>().ok();
-                        }
+                    if let SqlExpr::Value(Value::Number(n, _)) = e {
+                        q = n.parse::<f64>().ok();
                     }
                 }
             }
@@ -277,10 +273,9 @@ fn parse_expr(e: &SqlExpr) -> Result<Expr, ZenError> {
                     _ => return Err(ZenError::query("text_match arg 1 must be column")),
                 };
                 let query = match qarg {
-                    FunctionArg::Unnamed(FunctionArgExpr::Expr(SqlExpr::Value(v))) => match v {
-                        Value::SingleQuotedString(s) | Value::DoubleQuotedString(s) => s.clone(),
-                        _ => return Err(ZenError::query("text_match arg 2 must be string literal")),
-                    },
+                    FunctionArg::Unnamed(FunctionArgExpr::Expr(SqlExpr::Value(
+                        Value::SingleQuotedString(s) | Value::DoubleQuotedString(s),
+                    ))) => s.clone(),
                     _ => return Err(ZenError::query("text_match arg 2 must be string literal")),
                 };
                 return Ok(Expr::TextMatch { column, query });

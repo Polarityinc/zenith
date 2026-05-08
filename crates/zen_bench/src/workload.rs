@@ -23,7 +23,7 @@ impl Default for WorkloadConfig {
             rows: 4_000_000,
             tenants: 10,
             primary_tenant_share: 0.5,
-            seed: 0xc0_ffee_c0,
+            seed: 0xc0ff_eec0,
             time_window_ms: 7 * 24 * 3600 * 1000,
         }
     }

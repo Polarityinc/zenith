@@ -35,3 +35,44 @@ storage:
   bucket: zenithdb-prod
   region: us-east-1
   endpoint: ""
+
+# Pod scheduling protection — keep at least one replica live during
+# voluntary disruptions (node drains, kubectl rollouts).
+podDisruptionBudget:
+  enabled: true
+  minAvailable: 1
+
+# Horizontal scaling on CPU + memory pressure.
+autoscaling:
+  enabled: false
+  minReplicas: 2
+  maxReplicas: 10
+  targetCPUUtilizationPercentage: 70
+  targetMemoryUtilizationPercentage: 80
+
+# Network segmentation — default-deny with explicit ingress allowances.
+# Operators MUST set `allowFromNamespaces` (typically the LB / monitoring
+# namespaces) and `allowEgressCidrs` (S3 / Postgres / IdP) for the policy
+# to be useful.
+networkPolicy:
+  enabled: false
+  allowFromNamespaces: []
+  allowEgressCidrs: []
+
+# IRSA / Workload Identity binding goes here. We default to
+# `automountToken: false` because Zenith doesn't talk to the K8s API.
+serviceAccount:
+  create: true
+  name: ""
+  automountToken: false
+  annotations: {}
+  # Example for AWS IRSA:
+  #   eks.amazonaws.com/role-arn: arn:aws:iam::ACCOUNT:role/zenithdb-s3-kms
+
+# Ingress (optional — most users put a load balancer in front instead).
+ingress:
+  enabled: false
+  className: nginx
+  annotations: {}
+  hosts: []
+  tls: []

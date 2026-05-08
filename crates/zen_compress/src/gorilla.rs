@@ -50,7 +50,7 @@ impl BitWriter {
     }
 
     fn write_bits_inner(&mut self, value: u64, n: u8) {
-        debug_assert!(n >= 1 && n <= 32);
+        debug_assert!((1..=32).contains(&n));
         let mask = if n == 32 { 0xFFFF_FFFFu64 } else { (1u64 << n) - 1 };
         let masked = value & mask;
         self.buf |= masked << self.bits;
@@ -102,7 +102,7 @@ impl<'a> BitReader<'a> {
     }
 
     fn read_bits_inner(&mut self, n: u8) -> Result<u64, ZenError> {
-        debug_assert!(n >= 1 && n <= 32);
+        debug_assert!((1..=32).contains(&n));
         while self.bits < n {
             if self.pos >= self.src.len() {
                 return Err(ZenError::compress("gorilla EOF mid-bits"));
@@ -212,9 +212,9 @@ mod tests {
 
     #[test]
     fn one_value() {
-        let bytes = gorilla_encode(&[3.14]).unwrap();
+        let bytes = gorilla_encode(&[3.7]).unwrap();
         let v = gorilla_decompress(&bytes).unwrap();
-        assert_eq!(v, vec![3.14]);
+        assert_eq!(v, vec![3.7]);
     }
 
     #[test]

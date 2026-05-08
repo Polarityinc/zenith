@@ -1,0 +1,11 @@
+# Default reviewers for everything.
+*       @polarityinc/maintainers
+
+# Critical paths get a second pair of eyes.
+/crates/zen_storage/  @polarityinc/storage-team
+/crates/zen_format/   @polarityinc/storage-team
+/crates/zen_wal/      @polarityinc/storage-team
+/crates/zen_compactor/  @polarityinc/storage-team
+/crates/zen_auth/     @polarityinc/security-team
+/.github/             @polarityinc/security-team
+/deploy/              @polarityinc/sre-team

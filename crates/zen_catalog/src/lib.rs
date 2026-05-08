@@ -89,6 +89,15 @@ pub trait Catalog: Send + Sync + 'static {
         segment_ids: &[uuid::Uuid],
         at: DateTime<Utc>,
     ) -> ZenResult<u64>;
+
+    /// Upsert this node's heartbeat row. Called by every node on a 500 ms
+    /// tick (`zen_cluster::NodeRegistry`). Used to drive the cluster's
+    /// shard map.
+    async fn upsert_node(&self, row: NodeRow) -> ZenResult<()>;
+
+    /// List all known node rows, including stale ones — the cluster layer
+    /// filters by heartbeat TTL when computing the shard map.
+    async fn list_nodes(&self) -> ZenResult<Vec<NodeRow>>;
 }
 
 pub async fn open_catalog(cfg: &Config) -> ZenResult<Arc<dyn Catalog>> {

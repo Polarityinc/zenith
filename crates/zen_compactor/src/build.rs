@@ -9,7 +9,7 @@ use std::collections::HashMap;
 
 use ulid::Ulid;
 use zen_common::{
-    PartitionId, SchemaFingerprint, Schema, SpanRecord, TenantId, ZenError, ZenResult,
+    PartitionId, Schema, SpanRecord, TenantId, ZenError, ZenResult,
 };
 use zen_format::{
     encode_page, ColumnHotcacheEntry, ColumnValues, Hotcache, PageEncoding, RowGroupBuilder,
@@ -575,8 +575,8 @@ where
     let mut total_rows: usize = 0;
     let mut empty = true;
 
-    let mut iter = rows.into_iter();
-    while let Some(row) = iter.next() {
+    let iter = rows.into_iter();
+    for row in iter {
         meta.observe_time(row.start_time_ms);
         meta.observe_commit(row.commit_id);
         meta.observe_trace_id(row.trace_id);

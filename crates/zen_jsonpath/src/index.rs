@@ -9,7 +9,7 @@ use xxhash_rust::xxh3::xxh3_64;
 
 use zen_common::{ZenError, ZenResult};
 
-use crate::discovery::{walk, DiscoveredPath};
+use crate::discovery::walk;
 
 pub struct JsonPathIndexBuilder {
     /// `path_id` → posting maps from `value_hash` → row mask.

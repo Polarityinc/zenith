@@ -1,14 +1,18 @@
 //! Shared server state. All HTTP / gRPC handlers receive a clone of this.
 
 use std::sync::Arc;
+use std::time::Duration;
 
 use parking_lot::RwLock;
 
 use zen_catalog::Catalog;
+use zen_cluster::{NodeRegistry, RemoteClient};
 use zen_common::{Config, PartitionId, TenantId};
 use zen_memtable::MemTable;
 use zen_query::{LogicalPlan, SegmentCache, SegmentListCache};
 use zen_storage::BlobStore;
+
+use crate::middleware::auth::AuthState;
 
 #[derive(Clone)]
 pub struct ServerState {
@@ -22,10 +26,27 @@ pub struct ServerState {
     /// sqlparser cost per HTTP query when the same query repeats (typical
     /// dashboard refresh pattern).
     pub plan_cache: Arc<RwLock<std::collections::HashMap<u64, Arc<LogicalPlan>>>>,
+    /// Cluster handle. `None` = single-node mode (no routing). `Some` =
+    /// multi-node — heartbeats this node + drives `QueryRouter`.
+    pub cluster: Option<NodeRegistry>,
+    /// Inter-node HTTP client. Always present so handlers don't have to
+    /// branch on Option; cheap when unused (lazy connections).
+    pub remote: RemoteClient,
+    /// Auth verifiers. Cloneable; verify methods are async + lock-free
+    /// so the hot path adds ~50 ns on cache hit.
+    pub auth: AuthState,
 }
 
 impl ServerState {
     pub fn new(config: Config, catalog: Arc<dyn Catalog>, store: Arc<dyn BlobStore>) -> Self {
+        let auth = AuthState::from_config(&config);
+        // If HMAC is configured, the inter-node `RemoteClient` must sign
+        // outbound `/v1/internal/*` requests with the same secret the
+        // receiver's `hmac_layer` will verify.
+        let mut remote = RemoteClient::new(Duration::from_secs(30));
+        if let Some(signer) = auth.hmac.clone() {
+            remote = remote.with_signer(signer);
+        }
         Self {
             config,
             catalog,
@@ -34,7 +55,17 @@ impl ServerState {
             seg_cache: SegmentCache::new(1024),
             list_cache: SegmentListCache::default(),
             plan_cache: Arc::new(RwLock::new(std::collections::HashMap::new())),
+            cluster: None,
+            remote,
+            auth,
         }
+    }
+
+    /// Builder: enable multi-node mode by attaching a `NodeRegistry`. When
+    /// set, the query handler routes via the registry's `ShardMap`.
+    pub fn with_cluster(mut self, reg: NodeRegistry) -> Self {
+        self.cluster = Some(reg);
+        self
     }
 
     /// Parse + cache a query string. Re-uses an existing `Arc<LogicalPlan>` for

@@ -37,7 +37,7 @@ pub fn open_hnsw_index(blob: &[u8]) -> ZenResult<HnswHandle> {
     for (i, v) in vectors.iter().enumerate() {
         hnsw.insert((v.as_slice(), rids[i] as usize));
     }
-    let all_vectors: Vec<(u32, Vec<f32>)> = rids.iter().zip(vectors.into_iter()).map(|(r, v)| (*r, v)).collect();
+    let all_vectors: Vec<(u32, Vec<f32>)> = rids.iter().zip(vectors).map(|(r, v)| (*r, v)).collect();
     Ok(HnswHandle {
         hnsw,
         dimensions: header.dimensions,

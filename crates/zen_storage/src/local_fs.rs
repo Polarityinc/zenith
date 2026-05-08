@@ -18,26 +18,53 @@ use crate::store::BlobStore;
 
 pub struct LocalFsStore {
     root: PathBuf,
-    /// When false, skip `fsync` on writes. Trades durability-on-crash for
-    /// speed; on hardware with battery-backed write cache or for ephemeral
-    /// data, fsync per WAL write is wasted work.
+    /// When false, skip `fsync` on writes. Default is **true** — durability
+    /// is the safe choice. To opt out (for ephemeral dev / CI runs that
+    /// prize speed over crash-safety), construct with
+    /// [`LocalFsStore::new_unsafe_fast`] or set `ZEN_UNSAFE_FAST=1`.
     pub durable: bool,
+    /// Group-commit coordinator. When N concurrent durable writes are
+    /// in flight, only the first issues `sync_all()`; the rest piggyback
+    /// on the same kernel journal-flush barrier. Recovers most of the
+    /// fsync-default-on regression that durability_bench measured.
+    group: Arc<crate::group_commit::Coordinator>,
 }
 
 impl LocalFsStore {
     pub fn new(root: impl Into<PathBuf>) -> ZenResult<Self> {
+        Self::with_durable(root, default_durable())
+    }
+
+    /// Explicit opt-in for non-durable writes. Caller acknowledges that
+    /// crashes between WAL flush and disk-cache flush can lose committed
+    /// rows. Use only when the data is reproducible (tests / benchmarks).
+    pub fn new_unsafe_fast(root: impl Into<PathBuf>) -> ZenResult<Self> {
+        Self::with_durable(root, false)
+    }
+
+    fn with_durable(root: impl Into<PathBuf>, durable: bool) -> ZenResult<Self> {
         let root = root.into();
         std::fs::create_dir_all(&root)
             .map_err(|e| ZenError::storage(format!("mkdir {root:?}: {e}")))?;
-        // Default off for max speed. Set ZEN_FS_DURABLE=1 to enable fsync.
-        let durable = std::env::var("ZEN_FS_DURABLE").ok().as_deref() == Some("1");
-        Ok(Self { root, durable })
+        Ok(Self {
+            root,
+            durable,
+            group: Arc::new(crate::group_commit::Coordinator::default_coordinator()),
+        })
     }
 
     fn path_for(&self, key: &str) -> PathBuf {
         // Keys can contain '/'; we mirror them into the filesystem.
         self.root.join(key.trim_start_matches('/'))
     }
+}
+
+/// Default durability policy: ON unless `ZEN_UNSAFE_FAST=1` is explicitly
+/// set in the environment. The previous default (OFF unless `ZEN_FS_DURABLE=1`)
+/// was a silent-data-loss landmine; the polarity is now reversed so the
+/// safe choice is the implicit one.
+fn default_durable() -> bool {
+    std::env::var("ZEN_UNSAFE_FAST").ok().as_deref() != Some("1")
 }
 
 #[async_trait]
@@ -75,14 +102,38 @@ impl BlobStore for LocalFsStore {
                 .await
                 .map_err(|e| ZenError::storage(format!("mkdir {parent:?}: {e}")))?;
         }
-        // Atomic create: write to .tmp then rename.
+        // Atomic create: write to .tmp, fsync (if durable), then rename.
+        // Pre-fix this method silently dropped the fsync regardless of
+        // `self.durable`, which lost compactor-written segments on crash.
         let tmp = p.with_extension("tmp.zen-write");
-        fs::write(&tmp, bytes.as_ref())
+        let mut f = tokio::fs::OpenOptions::new()
+            .create(true)
+            .write(true)
+            .truncate(true)
+            .open(&tmp)
+            .await
+            .map_err(|e| ZenError::storage(format!("open tmp {key}: {e}")))?;
+        use tokio::io::AsyncWriteExt;
+        f.write_all(bytes.as_ref())
             .await
             .map_err(|e| ZenError::storage(format!("write tmp {key}: {e}")))?;
+        f.flush()
+            .await
+            .map_err(|e| ZenError::storage(format!("flush tmp {key}: {e}")))?;
+        if self.durable {
+            // Group commit: concurrent durable writes share one syscall.
+            self.group.wait(f).await?;
+        } else {
+            // Drop without fsync — speed mode.
+            drop(f);
+        }
         fs::rename(&tmp, &p)
             .await
             .map_err(|e| ZenError::storage(format!("rename {key}: {e}")))?;
+        // For full durability of the rename itself we'd fsync the parent
+        // dir. Skipped here because it adds a syscall per write; rename
+        // crash-recovery is well-understood (orphaned `.tmp.zen-write`
+        // files are pruned at startup by the GC).
         Ok(())
     }
 
@@ -106,9 +157,7 @@ impl BlobStore for LocalFsStore {
                     .await
                     .map_err(|e| ZenError::storage(format!("flush {key}: {e}")))?;
                 if self.durable {
-                    f.sync_all()
-                        .await
-                        .map_err(|e| ZenError::storage(format!("fsync {key}: {e}")))?;
+                    self.group.wait(f).await?;
                 }
                 Ok(true)
             }

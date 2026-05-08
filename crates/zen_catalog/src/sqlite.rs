@@ -44,76 +44,15 @@ impl SqliteCatalog {
         Self::open(":memory:").await
     }
 
+    /// Apply all pending migrations from `migrations/sqlite/`. The
+    /// `_sqlx_migrations` tracking table is created automatically; each
+    /// numbered SQL file applies once and only once. v0.x → v0.(x+1)
+    /// schema evolution becomes a new file, not a code change.
     async fn run_migrations(pool: &SqlitePool) -> ZenResult<()> {
-        let stmts = [
-            r#"CREATE TABLE IF NOT EXISTS tenants (
-                tenant_id INTEGER PRIMARY KEY,
-                name TEXT NOT NULL,
-                created_at TEXT NOT NULL DEFAULT (datetime('now'))
-            )"#,
-            r#"CREATE TABLE IF NOT EXISTS partitions (
-                tenant_id INTEGER NOT NULL,
-                partition_id INTEGER NOT NULL,
-                PRIMARY KEY (tenant_id, partition_id)
-            )"#,
-            r#"CREATE TABLE IF NOT EXISTS commit_seq_state (
-                tenant_id INTEGER NOT NULL,
-                partition_id INTEGER NOT NULL,
-                next_commit_id INTEGER NOT NULL DEFAULT 1,
-                PRIMARY KEY (tenant_id, partition_id)
-            )"#,
-            r#"CREATE TABLE IF NOT EXISTS wal_objects (
-                wal_id BLOB PRIMARY KEY,
-                tenant_id INTEGER NOT NULL,
-                partition_id INTEGER NOT NULL,
-                object_key TEXT NOT NULL,
-                commit_id_min INTEGER NOT NULL,
-                commit_id_max INTEGER NOT NULL,
-                byte_count INTEGER NOT NULL,
-                row_count INTEGER NOT NULL,
-                schema_fingerprint BLOB NOT NULL,
-                consumed_at TEXT,
-                created_at TEXT NOT NULL DEFAULT (datetime('now'))
-            )"#,
-            r#"CREATE INDEX IF NOT EXISTS wal_objects_unconsumed
-               ON wal_objects (tenant_id, partition_id, commit_id_min)
-               WHERE consumed_at IS NULL"#,
-            r#"CREATE TABLE IF NOT EXISTS segments (
-                segment_id BLOB PRIMARY KEY,
-                tenant_id INTEGER NOT NULL,
-                partition_id INTEGER NOT NULL,
-                object_key TEXT NOT NULL,
-                level INTEGER NOT NULL DEFAULT 0,
-                byte_count INTEGER NOT NULL,
-                row_count INTEGER NOT NULL,
-                time_min INTEGER NOT NULL,
-                time_max INTEGER NOT NULL,
-                trace_id_min BLOB NOT NULL,
-                trace_id_max BLOB NOT NULL,
-                commit_id_min INTEGER NOT NULL,
-                commit_id_max INTEGER NOT NULL,
-                schema_fingerprint BLOB NOT NULL,
-                rowgroup_index BLOB NOT NULL,
-                superseded_at TEXT,
-                created_at TEXT NOT NULL DEFAULT (datetime('now'))
-            )"#,
-            r#"CREATE INDEX IF NOT EXISTS segments_active
-               ON segments (tenant_id, partition_id, time_min, time_max)
-               WHERE superseded_at IS NULL"#,
-            r#"CREATE TABLE IF NOT EXISTS compaction_leases (
-                tenant_id INTEGER NOT NULL,
-                partition_id INTEGER NOT NULL,
-                worker_id TEXT NOT NULL,
-                expires_at TEXT NOT NULL,
-                PRIMARY KEY (tenant_id, partition_id)
-            )"#,
-        ];
-        for s in stmts {
-            sqlx::query(s)
-                .execute(pool)
-                .await
-                .map_err(|e| ZenError::catalog(format!("migration: {e}")))?;
-        }
+        sqlx::migrate!("./migrations/sqlite")
+            .run(pool)
+            .await
+            .map_err(|e| ZenError::catalog(format!("migration: {e}")))?;
         Ok(())
     }
 }
@@ -405,13 +344,10 @@ impl Catalog for SqliteCatalog {
                 let cur_exp = DateTime::parse_from_rfc3339(&exp_str)
                     .map_err(|e| ZenError::catalog(format!("lease exp parse: {e}")))?
                     .with_timezone(&Utc);
-                if cur_exp <= now {
-                    true // expired
-                } else if cur_worker == worker_id {
-                    true // refresh
-                } else {
-                    false
-                }
+                // Expired leases AND refreshes from the same worker can
+                // both take the lease. A different worker holding a
+                // still-valid lease blocks us.
+                cur_exp <= now || cur_worker == worker_id
             }
         };
         if !take {
@@ -496,6 +432,63 @@ impl Catalog for SqliteCatalog {
             total += r.rows_affected();
         }
         Ok(total)
+    }
+
+    async fn upsert_node(&self, row: crate::model::NodeRow) -> ZenResult<()> {
+        sqlx::query(
+            "INSERT INTO nodes (node_id, endpoint, role, shards, last_heartbeat_ms)
+             VALUES (?1, ?2, ?3, ?4, ?5)
+             ON CONFLICT(node_id) DO UPDATE SET
+                endpoint=excluded.endpoint,
+                role=excluded.role,
+                shards=excluded.shards,
+                last_heartbeat_ms=excluded.last_heartbeat_ms",
+        )
+        .bind(row.node_id.as_bytes().to_vec())
+        .bind(row.endpoint)
+        .bind(row.role)
+        .bind(row.shards)
+        .bind(row.last_heartbeat_ms)
+        .execute(&self.pool)
+        .await
+        .map_err(|e| ZenError::catalog(format!("upsert_node: {e}")))?;
+        Ok(())
+    }
+
+    async fn list_nodes(&self) -> ZenResult<Vec<crate::model::NodeRow>> {
+        let rows: Vec<NodeRowSql> =
+            sqlx::query_as("SELECT node_id, endpoint, role, shards, last_heartbeat_ms FROM nodes")
+                .fetch_all(&self.pool)
+                .await
+                .map_err(|e| ZenError::catalog(format!("list_nodes: {e}")))?;
+        rows.into_iter().map(|r| r.try_into()).collect()
+    }
+}
+
+#[derive(sqlx::FromRow)]
+struct NodeRowSql {
+    node_id: Vec<u8>,
+    endpoint: String,
+    role: String,
+    shards: String,
+    last_heartbeat_ms: i64,
+}
+
+impl TryFrom<NodeRowSql> for crate::model::NodeRow {
+    type Error = ZenError;
+    fn try_from(r: NodeRowSql) -> Result<Self, ZenError> {
+        if r.node_id.len() != 16 {
+            return Err(ZenError::catalog("nodes.node_id length != 16"));
+        }
+        let mut a = [0u8; 16];
+        a.copy_from_slice(&r.node_id);
+        Ok(crate::model::NodeRow {
+            node_id: uuid::Uuid::from_bytes(a),
+            endpoint: r.endpoint,
+            role: r.role,
+            shards: r.shards,
+            last_heartbeat_ms: r.last_heartbeat_ms,
+        })
     }
 }
 
@@ -694,5 +687,46 @@ mod tests {
             .unwrap();
         assert_eq!(list.len(), 1);
         assert_eq!(list[0].time_min, 1000);
+    }
+
+    #[tokio::test]
+    async fn nodes_upsert_and_list() {
+        let cat = SqliteCatalog::open_in_memory().await.unwrap();
+        let id1 = uuid::Uuid::new_v4();
+        let id2 = uuid::Uuid::new_v4();
+        cat.upsert_node(crate::model::NodeRow {
+            node_id: id1,
+            endpoint: "http://a:9000".into(),
+            role: "worker".into(),
+            shards: "*".into(),
+            last_heartbeat_ms: 100,
+        })
+        .await
+        .unwrap();
+        cat.upsert_node(crate::model::NodeRow {
+            node_id: id2,
+            endpoint: "http://b:9000".into(),
+            role: "all".into(),
+            shards: "tenant=1,2".into(),
+            last_heartbeat_ms: 200,
+        })
+        .await
+        .unwrap();
+        // Update id1's heartbeat — must be an upsert, not a duplicate row.
+        cat.upsert_node(crate::model::NodeRow {
+            node_id: id1,
+            endpoint: "http://a:9000".into(),
+            role: "worker".into(),
+            shards: "*".into(),
+            last_heartbeat_ms: 999,
+        })
+        .await
+        .unwrap();
+        let rows = cat.list_nodes().await.unwrap();
+        assert_eq!(rows.len(), 2);
+        let row_a = rows.iter().find(|r| r.node_id == id1).unwrap();
+        assert_eq!(row_a.last_heartbeat_ms, 999);
+        let row_b = rows.iter().find(|r| r.node_id == id2).unwrap();
+        assert_eq!(row_b.shards, "tenant=1,2");
     }
 }
