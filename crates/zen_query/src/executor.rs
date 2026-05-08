@@ -314,11 +314,38 @@ async fn scan_one_segment(
 ) -> ZenResult<()> {
     let extras = seg_cache.get_or_load(&seg.object_key, store).await?;
     let reader = extras.reader.clone();
-    let n_rgs = reader.row_group_count();
+    let row_group_count = reader.row_group_count();
+    if row_group_count <= 1 {
+        if let Some(max_rows) = max_rows {
+            if row_group_count == 0 || max_rows == 0 {
+                return Ok(());
+            }
+            let mut rg_plan = plan.clone();
+            rg_plan.limit = Some(max_rows.min(MAX_QUERY_LIMIT as usize) as u32);
+            let res = scan_row_group(&extras, 0, &rg_plan)?;
+            out.extend(res.rows);
+            stats.row_groups_pruned += res.pruned;
+            stats.row_groups_scanned += res.scanned;
+            stats.bytes_decoded_wide += res.bytes_decoded_wide;
+            return Ok(());
+        }
+
+        for rg_idx in 0..row_group_count {
+            let res = scan_row_group(&extras, rg_idx, plan)?;
+            out.extend(res.rows);
+            stats.row_groups_pruned += res.pruned;
+            stats.row_groups_scanned += res.scanned;
+            stats.bytes_decoded_wide += res.bytes_decoded_wide;
+        }
+        return Ok(());
+    }
+
+    let (candidate_rgs, pre_pruned) = candidate_row_groups(&reader, plan);
+    stats.row_groups_pruned += pre_pruned;
 
     if let Some(max_rows) = max_rows {
         let start_len = out.len();
-        for rg_idx in 0..n_rgs {
+        for rg_idx in candidate_rgs {
             let emitted = out.len().saturating_sub(start_len);
             let remaining = max_rows.saturating_sub(emitted);
             if remaining == 0 {
@@ -338,8 +365,8 @@ async fn scan_one_segment(
         return Ok(());
     }
 
-    if n_rgs <= 1 {
-        for rg_idx in 0..n_rgs {
+    if candidate_rgs.len() <= 1 {
+        for rg_idx in candidate_rgs {
             let res = scan_row_group(&extras, rg_idx, plan)?;
             out.extend(res.rows);
             stats.row_groups_pruned += res.pruned;
@@ -350,8 +377,8 @@ async fn scan_one_segment(
     }
 
     let mut handles: Vec<tokio::task::JoinHandle<ZenResult<RgScanResult>>> =
-        Vec::with_capacity(n_rgs);
-    for rg_idx in 0..n_rgs {
+        Vec::with_capacity(candidate_rgs.len());
+    for rg_idx in candidate_rgs {
         let extras = extras.clone();
         let plan = plan.clone();
         handles.push(tokio::task::spawn_blocking(move || {
@@ -375,6 +402,44 @@ struct RgScanResult {
     pruned: u32,
     scanned: u32,
     bytes_decoded_wide: u64,
+}
+
+fn candidate_row_groups(reader: &SegmentReader, plan: &LogicalPlan) -> (Vec<usize>, u32) {
+    let col_idx = |name: &str| -> Option<u32> {
+        reader
+            .metadata
+            .column_names
+            .iter()
+            .position(|c| c == name)
+            .map(|i| i as u32)
+    };
+    let predicate = plan.predicate.as_ref().map(|p| &p.expr);
+    let mut out = Vec::with_capacity(reader.row_group_count());
+    let mut pruned = 0u32;
+    for rg_idx in 0..reader.row_group_count() {
+        if let Some(expr) = predicate {
+            if !zone_map_might_match(reader, &col_idx, rg_idx, expr) {
+                pruned += 1;
+                continue;
+            }
+        }
+        if plan.time_min_ms != i64::MIN || plan.time_max_ms != i64::MAX {
+            if let Some(t_idx) = col_idx("start_time_ms") {
+                if let Some(rg_hc) = reader.hotcache.row_groups.get(rg_idx) {
+                    if let Some(c) = rg_hc.columns.iter().find(|c| c.column_idx == t_idx) {
+                        if let zen_index::ZoneMapValue::I64 { min, max } = c.zone_map.value {
+                            if max < plan.time_min_ms || min > plan.time_max_ms {
+                                pruned += 1;
+                                continue;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        out.push(rg_idx);
+    }
+    (out, pruned)
 }
 
 fn scan_row_group(
@@ -401,6 +466,9 @@ fn scan_row_group(
 
     let predicate = plan.predicate.as_ref().map(|p| &p.expr);
     let row_count = reader.row_groups[rg_idx].row_count as usize;
+    let limit = plan.limit.map(|l| l as usize);
+    let allow_limit_pushdown =
+        plan.aggregates.is_empty() && plan.order_by.is_none() && plan.group_by.is_empty();
 
     if let Some(expr) = predicate {
         if !zone_map_might_match(reader, &col_idx, rg_idx, expr) {
@@ -423,18 +491,30 @@ fn scan_row_group(
         }
     }
 
-    let mut mask = full_row_bitmap(row_count);
-    if let Some(expr) = predicate {
-        let bm = eval_predicate(extras, &col_idx, rg_idx, expr, row_count)?;
-        mask &= bm;
-    }
+    let mut mask = if let Some(expr) = predicate {
+        let pred_limit = if allow_limit_pushdown && predicate_supports_limit(expr) {
+            limit
+        } else {
+            None
+        };
+        let bm = eval_predicate(extras, &col_idx, rg_idx, expr, row_count, pred_limit)?;
+        if pred_limit.is_some() && row_count >= 4096 && matches!(expr, Expr::JsonPathEq { .. }) {
+            bm
+        } else {
+            let mut mask = full_row_bitmap(row_count);
+            mask &= bm;
+            mask
+        }
+    } else {
+        full_row_bitmap(row_count)
+    };
     if plan.time_min_ms != i64::MIN || plan.time_max_ms != i64::MAX {
         if let Some(t_idx) = col_idx("start_time_ms") {
             if let ColumnValues::I64(times) = reader.read_column(rg_idx, t_idx)? {
                 let mut tmask = RoaringBitmap::new();
                 for (i, t) in times.iter().enumerate() {
                     if *t >= plan.time_min_ms && *t <= plan.time_max_ms {
-                        tmask.insert(i as u32);
+                        tmask.push(i as u32);
                     }
                 }
                 mask &= tmask;
@@ -446,14 +526,11 @@ fn scan_row_group(
         return Ok(out);
     }
     out.scanned += 1;
-    let limit = plan.limit.map(|l| l as usize);
 
     // LIMIT pushdown: when the query has a LIMIT and no global aggregation
     // / ORDER BY, only materialize the first `limit` surviving rows from
     // this row group. Without this, queries returning a large bitmap pay
     // the cost of decoding every match before truncating to LIMIT.
-    let allow_limit_pushdown =
-        plan.aggregates.is_empty() && plan.order_by.is_none() && plan.group_by.is_empty();
     let rows_idx: Vec<usize> = if let (Some(l), true) = (limit, allow_limit_pushdown) {
         mask.iter().take(l).map(|i| i as usize).collect()
     } else {
@@ -573,27 +650,39 @@ async fn execute_count_aggregate(
         };
         stats.segments_scanned += segments.len() as u32;
 
-        // Bounded per-segment aggregation. At 1 TB+ a partition can contain
-        // thousands of segments; spawning all of them at once adds avoidable
-        // memory pressure and can overwhelm object storage.
+        // Fan out small/medium segment sets fully for latency. At 1 TB+ a
+        // partition can contain thousands of segments, so cap concurrency
+        // once the fan-out gets large enough to add memory pressure.
         use futures::stream::{self, StreamExt};
         const MAX_IN_FLIGHT: usize = 64;
+        const UNBOUNDED_FANOUT_LIMIT: usize = 512;
         let plan_clone = plan.clone();
         let store_clone = store.clone();
         let seg_cache_clone = seg_cache.clone();
         // Alias the per-segment count payload so clippy doesn't flag the
         // collected Vec as a "very complex type".
         type SegCount = (ahash::AHashMap<Vec<String>, i64>, ResultStats);
-        let results: Vec<ZenResult<SegCount>> = stream::iter(segments.into_iter())
-            .map(|seg| {
+        let results: Vec<ZenResult<SegCount>> = if segments.len() <= UNBOUNDED_FANOUT_LIMIT {
+            use futures::future::join_all;
+            let futs = segments.into_iter().map(|seg| {
                 let store = store_clone.clone();
                 let seg_cache = seg_cache_clone.clone();
                 let plan = plan_clone.clone();
                 async move { count_one_segment(&seg, store, &seg_cache, &plan).await }
-            })
-            .buffer_unordered(MAX_IN_FLIGHT)
-            .collect()
-            .await;
+            });
+            join_all(futs).await
+        } else {
+            stream::iter(segments.into_iter())
+                .map(|seg| {
+                    let store = store_clone.clone();
+                    let seg_cache = seg_cache_clone.clone();
+                    let plan = plan_clone.clone();
+                    async move { count_one_segment(&seg, store, &seg_cache, &plan).await }
+                })
+                .buffer_unordered(MAX_IN_FLIGHT)
+                .collect()
+                .await
+        };
         for r in results {
             let (m, s) = r?;
             stats.row_groups_pruned += s.row_groups_pruned;
@@ -672,7 +761,6 @@ async fn count_one_segment(
     seg_cache: &SegmentCache,
     plan: &LogicalPlan,
 ) -> ZenResult<(ahash::AHashMap<Vec<String>, i64>, ResultStats)> {
-    use zen_format::ColumnValues;
     let extras = seg_cache.get_or_load(&seg.object_key, store).await?;
     let reader = &extras.reader;
 
@@ -701,12 +789,51 @@ async fn count_one_segment(
             }
         }
 
-        // Compute mask.
-        let mut mask = full_row_bitmap(row_count);
-        if let Some(expr) = predicate {
-            let bm = eval_predicate(&extras, &col_idx, rg_idx, expr, row_count)?;
-            mask &= bm;
+        if predicate.is_none() && plan.time_min_ms == i64::MIN && plan.time_max_ms == i64::MAX {
+            stats.row_groups_scanned += 1;
+            if plan.group_by.is_empty() {
+                *counts.entry(Vec::new()).or_insert(0) += row_count as i64;
+                continue;
+            }
+            let cols: Vec<u32> = plan.group_by.iter().filter_map(|c| col_idx(c)).collect();
+            if cols.len() != plan.group_by.len() {
+                return Err(zen_common::ZenError::query("group_by column missing"));
+            }
+            if cols.len() == 1 {
+                use zen_format::PageView;
+                let view = reader.open_page(rg_idx, cols[0])?;
+                if let PageView::Dict(dec) = view {
+                    let mut local: ahash::AHashMap<u32, i64> =
+                        ahash::AHashMap::with_capacity(dec.dict.len());
+                    for &k in dec.keys.iter().take(row_count) {
+                        *local.entry(k).or_insert(0) += 1;
+                    }
+                    for (k, c) in local {
+                        let s = String::from_utf8_lossy(&dec.dict[k as usize]).into_owned();
+                        *counts.entry(vec![s]).or_insert(0) += c;
+                    }
+                    continue;
+                }
+            }
+
+            let mut col_values: Vec<Vec<String>> = Vec::with_capacity(cols.len());
+            for &c in &cols {
+                let cv = reader.read_column(rg_idx, c)?;
+                col_values.push(group_column_to_strings(cv)?);
+            }
+            for r in 0..row_count {
+                let key: Vec<String> = col_values.iter().map(|v| v[r].clone()).collect();
+                *counts.entry(key).or_insert(0) += 1;
+            }
+            continue;
         }
+
+        // Compute mask.
+        let mask = if let Some(expr) = predicate {
+            eval_predicate(&extras, &col_idx, rg_idx, expr, row_count, None)?
+        } else {
+            full_row_bitmap(row_count)
+        };
         if mask.is_empty() {
             stats.row_groups_pruned += 1;
             continue;
@@ -750,16 +877,7 @@ async fn count_one_segment(
         let mut col_values: Vec<Vec<String>> = Vec::with_capacity(cols.len());
         for &c in &cols {
             let cv = reader.read_column(rg_idx, c)?;
-            let strs: Vec<String> = match cv {
-                ColumnValues::StringsOwned(v) => v
-                    .into_iter()
-                    .map(|s| String::from_utf8_lossy(&s).into_owned())
-                    .collect(),
-                ColumnValues::I64(v) => v.into_iter().map(|i| i.to_string()).collect(),
-                ColumnValues::F64(v) => v.into_iter().map(|f| f.to_string()).collect(),
-                _ => return Err(zen_common::ZenError::query("unsupported group_by col type")),
-            };
-            col_values.push(strs);
+            col_values.push(group_column_to_strings(cv)?);
         }
         for r in mask.iter() {
             let r = r as usize;
@@ -768,6 +886,18 @@ async fn count_one_segment(
         }
     }
     Ok((counts, stats))
+}
+
+fn group_column_to_strings(cv: ColumnValues<'static>) -> ZenResult<Vec<String>> {
+    match cv {
+        ColumnValues::StringsOwned(v) => Ok(v
+            .into_iter()
+            .map(|s| String::from_utf8_lossy(&s).into_owned())
+            .collect()),
+        ColumnValues::I64(v) => Ok(v.into_iter().map(|i| i.to_string()).collect()),
+        ColumnValues::F64(v) => Ok(v.into_iter().map(|f| f.to_string()).collect()),
+        _ => Err(zen_common::ZenError::query("unsupported group_by col type")),
+    }
 }
 
 /// Walk the predicate tree looking for an `Eq(Column("trace_id"), Literal::String(ulid))`
@@ -943,21 +1073,22 @@ fn eval_predicate(
     rg_idx: usize,
     expr: &Expr,
     row_count: usize,
+    result_limit: Option<usize>,
 ) -> ZenResult<RoaringBitmap> {
     let reader = &extras.reader;
     match expr {
         Expr::And(a, b) => {
-            let l = eval_predicate(extras, col_idx, rg_idx, a, row_count)?;
-            let r = eval_predicate(extras, col_idx, rg_idx, b, row_count)?;
+            let l = eval_predicate(extras, col_idx, rg_idx, a, row_count, None)?;
+            let r = eval_predicate(extras, col_idx, rg_idx, b, row_count, None)?;
             Ok(l & r)
         }
         Expr::Or(a, b) => {
-            let l = eval_predicate(extras, col_idx, rg_idx, a, row_count)?;
-            let r = eval_predicate(extras, col_idx, rg_idx, b, row_count)?;
+            let l = eval_predicate(extras, col_idx, rg_idx, a, row_count, None)?;
+            let r = eval_predicate(extras, col_idx, rg_idx, b, row_count, None)?;
             Ok(l | r)
         }
         Expr::Not(a) => {
-            let l = eval_predicate(extras, col_idx, rg_idx, a, row_count)?;
+            let l = eval_predicate(extras, col_idx, rg_idx, a, row_count, None)?;
             let all = full_row_bitmap(row_count);
             Ok(all - l)
         }
@@ -994,21 +1125,31 @@ fn eval_predicate(
         }
         Expr::TextMatch { column, query } => {
             // Cached FTS handle path.
-            if let Some(bm) = extras.fts_search_cached(rg_idx as u32, column, query) {
+            let limit = result_limit.unwrap_or(100_000);
+            if let Some(bm) = extras.fts_search_cached(rg_idx as u32, column, query, limit) {
                 return Ok((*bm).clone());
             }
-            scan_text_match(reader, col_idx, rg_idx, expr)
+            scan_text_match(reader, col_idx, rg_idx, expr, result_limit)
         }
         Expr::JsonPathEq { path, value } => {
-            if let Some(bm) = extras.jsonpath_lookup_cached(rg_idx as u32, path, value) {
+            if let Some(bm) =
+                extras.jsonpath_lookup_cached(rg_idx as u32, path, value, result_limit)
+            {
                 return Ok((*bm).clone());
             }
-            scan_jsonpath_eq(reader, col_idx, rg_idx, expr)
+            scan_jsonpath_eq(reader, col_idx, rg_idx, expr, result_limit)
         }
         Expr::Literal(Literal::Bool(true)) => Ok(full_row_bitmap(row_count)),
         Expr::Literal(Literal::Bool(false)) => Ok(RoaringBitmap::new()),
         _ => Err(ZenError::query(format!("unsupported predicate: {expr:?}"))),
     }
+}
+
+fn predicate_supports_limit(expr: &Expr) -> bool {
+    matches!(
+        expr,
+        Expr::Eq(_, _) | Expr::TextMatch { .. } | Expr::JsonPathEq { .. }
+    )
 }
 
 fn eval_compare(
@@ -1073,6 +1214,7 @@ fn scan_text_match(
     col_idx: &dyn Fn(&str) -> Option<u32>,
     rg_idx: usize,
     expr: &Expr,
+    result_limit: Option<usize>,
 ) -> ZenResult<RoaringBitmap> {
     if let Expr::TextMatch { column, query } = expr {
         let i = col_idx(column).ok_or_else(|| ZenError::query(format!("column {column}")))?;
@@ -1090,7 +1232,7 @@ fn scan_text_match(
                             let q = zen_fts::FtsQuery {
                                 field: Some(column),
                                 query,
-                                limit: 100_000,
+                                limit: result_limit.unwrap_or(100_000),
                             };
                             if let Ok(bm) = handle.search_to_bitmap(&q) {
                                 return Ok(bm);
@@ -1109,6 +1251,9 @@ fn scan_text_match(
                 if let Ok(s) = std::str::from_utf8(&b) {
                     if s.to_lowercase().contains(&needle) {
                         bm.push(r as u32);
+                        if result_limit.is_some_and(|limit| bm.len() as usize >= limit) {
+                            break;
+                        }
                     }
                 }
             }
@@ -1123,6 +1268,7 @@ fn scan_jsonpath_eq(
     col_idx: &dyn Fn(&str) -> Option<u32>,
     rg_idx: usize,
     expr: &Expr,
+    result_limit: Option<usize>,
 ) -> ZenResult<RoaringBitmap> {
     if let Expr::JsonPathEq { path, value } = expr {
         let meta_idx = col_idx("metadata").ok_or_else(|| ZenError::query("no metadata column"))?;
@@ -1137,7 +1283,10 @@ fn scan_jsonpath_eq(
                         let bytes = &reader.bytes[start..end];
                         if let Ok(idx) = zen_jsonpath::JsonPathIndex::deserialize(bytes) {
                             if idx.knows_path(path) {
-                                let bm = idx.lookup(path, value).cloned().unwrap_or_default();
+                                let bm = idx
+                                    .lookup(path, value)
+                                    .map(|bm| bitmap_prefix(bm, result_limit))
+                                    .unwrap_or_default();
                                 return Ok(bm);
                             }
                         }
@@ -1162,6 +1311,9 @@ fn scan_jsonpath_eq(
                     });
                     if found {
                         bm.push(r as u32);
+                        if result_limit.is_some_and(|limit| bm.len() as usize >= limit) {
+                            break;
+                        }
                     }
                 }
             }
@@ -1169,6 +1321,17 @@ fn scan_jsonpath_eq(
         return Ok(bm);
     }
     Err(ZenError::query("not jsonpath_eq"))
+}
+
+fn bitmap_prefix(bitmap: &RoaringBitmap, limit: Option<usize>) -> RoaringBitmap {
+    let Some(limit) = limit else {
+        return bitmap.clone();
+    };
+    let mut out = RoaringBitmap::new();
+    for row in bitmap.iter().take(limit) {
+        out.push(row);
+    }
+    out
 }
 
 /// If a posting list is available in the hotcache for `(rg_idx, column_idx)`,
