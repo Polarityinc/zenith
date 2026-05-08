@@ -4,8 +4,6 @@
 //! we expose a synchronous in-memory reader and a `from_bytes` constructor;
 //! the storage layer composes this with `object_store` for real cold reads.
 
-use bytes::Buf;
-
 use zen_common::ZenError;
 
 use crate::footer::Footer;
@@ -39,8 +37,8 @@ impl SegmentReader {
         // Footer length is right before the trailer (u32 le).
         let trailer_off = bytes.len() - MAGIC_TRAILER.len();
         let footer_len_off = trailer_off - 4;
-        let footer_len = u32::from_le_bytes(bytes[footer_len_off..trailer_off].try_into().unwrap())
-            as usize;
+        let footer_len =
+            u32::from_le_bytes(bytes[footer_len_off..trailer_off].try_into().unwrap()) as usize;
         if footer_len_off < footer_len {
             return Err(ZenError::format("footer length too large"));
         }
@@ -54,15 +52,23 @@ impl SegmentReader {
             )));
         }
 
-        // Metadata
+        // Metadata. Every offset comes from `footer`, which itself comes
+        // from the file — we must not trust them to be in-range without
+        // checks (proptest discovered a panic here).
         let m_start = footer.metadata_offset as usize;
         if bytes.len() < m_start + 4 {
             return Err(ZenError::format("metadata length truncated"));
         }
         let m_len_bytes = &bytes[m_start..m_start + 4];
-        let m_len =
-            u32::from_le_bytes(m_len_bytes.try_into().unwrap()) as usize;
-        let metadata: SegmentMetadata = bincode::deserialize(&bytes[m_start + 4..m_start + 4 + m_len])
+        let m_len = u32::from_le_bytes(m_len_bytes.try_into().unwrap()) as usize;
+        let m_body_start = m_start + 4;
+        let m_body_end = m_body_start
+            .checked_add(m_len)
+            .ok_or_else(|| ZenError::format("metadata length overflows"))?;
+        if m_body_end > bytes.len() {
+            return Err(ZenError::format("metadata body truncated"));
+        }
+        let metadata: SegmentMetadata = bincode::deserialize(&bytes[m_body_start..m_body_end])
             .map_err(|e| ZenError::format(format!("metadata deserialize: {e}")))?;
 
         // Row group headers
@@ -90,8 +96,16 @@ impl SegmentReader {
 
         // Hotcache
         let hc_off = footer.hotcache_offset as usize;
-        let hc_end = hc_off + footer.hotcache_length as usize;
+        let hc_end = hc_off.saturating_add(footer.hotcache_length as usize);
+        // Validate bounds before slicing — corrupted footer offsets must
+        // never trigger an out-of-range panic. Found via proptest.
         let hotcache: Hotcache = if footer.hotcache_length > 0 {
+            if hc_end > bytes.len() || hc_off > hc_end {
+                return Err(ZenError::format(format!(
+                    "hotcache range {hc_off}..{hc_end} out of bounds (len={})",
+                    bytes.len()
+                )));
+            }
             bincode::deserialize(&bytes[hc_off..hc_end])
                 .map_err(|e| ZenError::format(format!("hotcache deserialize: {e}")))?
         } else {
@@ -136,7 +150,11 @@ impl SegmentReader {
         Ok(&self.bytes[off..off + len])
     }
 
-    pub fn column_encoding(&self, rg_idx: usize, column_idx: u32) -> Result<PageEncoding, ZenError> {
+    pub fn column_encoding(
+        &self,
+        rg_idx: usize,
+        column_idx: u32,
+    ) -> Result<PageEncoding, ZenError> {
         let rgh = self
             .row_groups
             .get(rg_idx)
@@ -148,7 +166,11 @@ impl SegmentReader {
     }
 
     /// Decode a full column page in a row group.
-    pub fn read_column(&self, rg_idx: usize, column_idx: u32) -> Result<ColumnValues<'static>, ZenError> {
+    pub fn read_column(
+        &self,
+        rg_idx: usize,
+        column_idx: u32,
+    ) -> Result<ColumnValues<'static>, ZenError> {
         let bytes = self.column_page_bytes(rg_idx, column_idx)?;
         let enc = self.column_encoding(rg_idx, column_idx)?;
         decode_page(enc, bytes)
@@ -168,7 +190,11 @@ impl SegmentReader {
 
     /// Open a page view for a (row-group, column). The view amortizes
     /// per-page setup; call `row(i)` repeatedly to decode many rows cheaply.
-    pub fn open_page<'a>(&'a self, rg_idx: usize, column_idx: u32) -> Result<PageView<'a>, ZenError> {
+    pub fn open_page<'a>(
+        &'a self,
+        rg_idx: usize,
+        column_idx: u32,
+    ) -> Result<PageView<'a>, ZenError> {
         let bytes = self.column_page_bytes(rg_idx, column_idx)?;
         let enc = self.column_encoding(rg_idx, column_idx)?;
         PageView::open(enc, bytes)
@@ -193,7 +219,6 @@ impl SegmentReader {
 
 #[cfg(test)]
 mod tests {
-    use bytes::Buf;
 
     use zen_common::{CommitId, PartitionId, SchemaFingerprint, SpanId, TenantId, TraceId};
 
@@ -210,7 +235,12 @@ mod tests {
             TenantId(7),
             PartitionId(0),
             fp,
-            vec!["trace_id".into(), "start_time_ms".into(), "model".into(), "prompt".into()],
+            vec![
+                "trace_id".into(),
+                "start_time_ms".into(),
+                "model".into(),
+                "prompt".into(),
+            ],
             vec!["trace_id".into(), "start_time_ms".into()],
         );
         meta.observe_time(1000);
@@ -227,8 +257,7 @@ mod tests {
         let mut rgb = RowGroupBuilder::new(3);
         // Column 0: trace_ids (Fixed16)
         let trace_ids: Vec<[u8; 16]> = vec![[0x10; 16], [0x15; 16], [0x20; 16]];
-        let (e, b) =
-            encode_page(ColumnValues::Fixed16(trace_ids), PageEncoding::FixedRaw).unwrap();
+        let (e, b) = encode_page(ColumnValues::Fixed16(trace_ids), PageEncoding::FixedRaw).unwrap();
         rgb.add_page(0, e, b.to_vec(), 48);
         // Column 1: start_time_ms (For)
         let times: Vec<i64> = vec![1000, 1500, 2000];
@@ -236,8 +265,7 @@ mod tests {
         rgb.add_page(1, e, b.to_vec(), 24);
         // Column 2: model (Dict)
         let models: Vec<Vec<u8>> = vec![b"gpt-4o".to_vec(), b"haiku".to_vec(), b"gpt-4o".to_vec()];
-        let (e, b) =
-            encode_page(ColumnValues::StringsOwned(models), PageEncoding::Dict).unwrap();
+        let (e, b) = encode_page(ColumnValues::StringsOwned(models), PageEncoding::Dict).unwrap();
         rgb.add_page(2, e, b.to_vec(), 30);
         // Column 3: prompt (FsstWithOffsets)
         let prompts: Vec<Vec<u8>> = vec![
@@ -331,5 +359,38 @@ mod tests {
         let a = build_simple_segment();
         let b = build_simple_segment();
         assert_eq!(a, b);
+    }
+
+    proptest::proptest! {
+        /// `SegmentReader::from_bytes` must never panic on garbage input.
+        /// The parser is exposed to network-controlled bytes (the
+        /// reader pulls segments from object storage); a panic is a DoS.
+        #[test]
+        fn arbitrary_bytes_never_panic(
+            bytes in proptest::collection::vec(proptest::prelude::any::<u8>(), 0..4096),
+        ) {
+            let _ = SegmentReader::from_bytes(bytes);
+        }
+
+        /// A real segment with one byte mutated should either parse to
+        /// the same shape (some bytes are in slack space) or return an
+        /// `Err`. It must NEVER produce a `Reader` whose `row_group_count`
+        /// returns a pathological value that would make later code panic.
+        #[test]
+        fn one_byte_mutation_doesnt_corrupt_invariants(
+            mut_off in 0usize..4096,
+            mut_xor in 1u8..=u8::MAX,
+        ) {
+            let good = build_simple_segment();
+            if mut_off >= good.len() {
+                return Ok(());
+            }
+            let mut bad = good.clone();
+            bad[mut_off] ^= mut_xor;
+            if let Ok(r) = SegmentReader::from_bytes(bad) {
+                let n = r.row_group_count();
+                proptest::prop_assert!(n < 1_000_000, "absurd row group count {n}");
+            }
+        }
     }
 }

@@ -37,7 +37,8 @@ pub fn open_hnsw_index(blob: &[u8]) -> ZenResult<HnswHandle> {
     for (i, v) in vectors.iter().enumerate() {
         hnsw.insert((v.as_slice(), rids[i] as usize));
     }
-    let all_vectors: Vec<(u32, Vec<f32>)> = rids.iter().zip(vectors.into_iter()).map(|(r, v)| (*r, v)).collect();
+    let all_vectors: Vec<(u32, Vec<f32>)> =
+        rids.iter().zip(vectors).map(|(r, v)| (*r, v)).collect();
     Ok(HnswHandle {
         hnsw,
         dimensions: header.dimensions,
@@ -93,7 +94,11 @@ impl HnswHandle {
                     distance: l2(query, v),
                 })
                 .collect();
-            scored.sort_by(|a, b| a.distance.partial_cmp(&b.distance).unwrap_or(std::cmp::Ordering::Equal));
+            scored.sort_by(|a, b| {
+                a.distance
+                    .partial_cmp(&b.distance)
+                    .unwrap_or(std::cmp::Ordering::Equal)
+            });
             scored.truncate(k);
             return Ok(HybridResult {
                 hits: scored,
@@ -116,7 +121,11 @@ impl HnswHandle {
                 }
             })
             .collect();
-        hits.sort_by(|a, b| a.distance.partial_cmp(&b.distance).unwrap_or(std::cmp::Ordering::Equal));
+        hits.sort_by(|a, b| {
+            a.distance
+                .partial_cmp(&b.distance)
+                .unwrap_or(std::cmp::Ordering::Equal)
+        });
         hits.truncate(k);
         Ok(HybridResult {
             hits,
@@ -196,8 +205,7 @@ mod tests {
             bf.truncate(k);
             let bf_set: std::collections::HashSet<u32> =
                 bf.iter().map(|(i, _)| *i as u32).collect();
-            let hit_set: std::collections::HashSet<u32> =
-                hits.iter().map(|h| h.row_idx).collect();
+            let hit_set: std::collections::HashSet<u32> = hits.iter().map(|h| h.row_idx).collect();
             let common = bf_set.intersection(&hit_set).count();
             total_recall += common as f64 / k as f64;
         }

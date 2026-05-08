@@ -32,12 +32,7 @@ impl RequestCoalescer {
         Self::default()
     }
 
-    pub async fn run<F, Fut>(
-        &self,
-        key: &str,
-        range: Range<u64>,
-        fetch: F,
-    ) -> ZenResult<Bytes>
+    pub async fn run<F, Fut>(&self, key: &str, range: Range<u64>, fetch: F) -> ZenResult<Bytes>
     where
         F: FnOnce() -> Fut,
         Fut: std::future::Future<Output = ZenResult<Bytes>>,

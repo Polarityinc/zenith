@@ -160,7 +160,7 @@ mod tests {
     async fn cache_evicts_at_capacity() {
         let inner = Arc::new(InMemoryStore::default());
         inner
-            .put("k", Bytes::from_iter(std::iter::repeat(b'A').take(1024)))
+            .put("k", Bytes::from_iter(std::iter::repeat_n(b'A', 1024)))
             .await
             .unwrap();
         let cached = CachedStore::new(inner.clone(), PageCache::new(2048));

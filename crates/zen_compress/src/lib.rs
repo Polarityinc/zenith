@@ -4,19 +4,19 @@
 //! `zen_format` produces. Each encoder is independently testable and has a
 //! property test for round-trip correctness.
 
-pub mod fsst;
-pub mod zstd_page;
-pub mod gorilla;
-pub mod for_bitpack;
-pub mod rle;
 pub mod dict;
+pub mod for_bitpack;
+pub mod fsst;
+pub mod gorilla;
+pub mod rle;
+pub mod zstd_page;
 
-pub use fsst::{FsstCompressor, FsstHeader};
-pub use zstd_page::{zstd_compress, zstd_decompress};
-pub use gorilla::{gorilla_decompress, gorilla_encode};
-pub use for_bitpack::{for_decompress, for_encode};
-pub use rle::{rle_decompress, rle_encode};
 pub use dict::{DictBuilder, DictDecoder};
+pub use for_bitpack::{for_decompress, for_encode};
+pub use fsst::{FsstCompressor, FsstHeader};
+pub use gorilla::{gorilla_decompress, gorilla_encode};
+pub use rle::{rle_decompress, rle_encode};
+pub use zstd_page::{zstd_compress, zstd_decompress};
 
 /// Encoding tag stored in every page header so the reader knows how to decode.
 #[repr(u8)]

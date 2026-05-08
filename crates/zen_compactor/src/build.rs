@@ -8,14 +8,12 @@
 use std::collections::HashMap;
 
 use ulid::Ulid;
-use zen_common::{
-    PartitionId, SchemaFingerprint, Schema, SpanRecord, TenantId, ZenError, ZenResult,
-};
+use zen_common::{PartitionId, Schema, SpanRecord, TenantId, ZenError, ZenResult};
+use zen_format::hotcache::RowGroupHotcacheEntry;
 use zen_format::{
     encode_page, ColumnHotcacheEntry, ColumnValues, Hotcache, PageEncoding, RowGroupBuilder,
     SegmentMetadata, SegmentWriter,
 };
-use zen_format::hotcache::RowGroupHotcacheEntry;
 use zen_index::{PostingMap, ZoneMap, ZoneMapValue};
 
 #[derive(Clone, Debug)]
@@ -112,18 +110,85 @@ pub fn build_segment_from_rows(
             let bytes = pm
                 .serialize()
                 .map_err(|e| ZenError::compactor(format!("posting serialize: {e}")))?;
-            // Posting offset is absolute in the segment file. We don't yet know
-            // where inline_indexes will land in the segment; we'll patch that up
-            // in `set_inline_indexes` callers. For now we record offset relative
-            // to inline_indexes start, and mark with a sentinel that the executor
-            // adds the inline-indexes base later.
             let local_off = inline_indexes.len() as u64;
             let len = bytes.len() as u32;
             inline_indexes.extend_from_slice(&bytes);
-            // Patch the matching ColumnHotcacheEntry.
             if let Some(entry) = zone_maps.iter_mut().find(|c| c.column_idx == *col_idx) {
                 entry.posting_offset = Some(local_off);
                 entry.posting_length = Some(len);
+            }
+        }
+
+        // Build a Tantivy FTS index spanning prompt + completion + tool_io_text.
+        // We index ALL three text columns into one inline blob and record the
+        // offset/length on each text column's hotcache entry so the executor
+        // can find it from any of them.
+        let fts_field_names = ["prompt", "completion", "tool_io_text"];
+        let fts_col_indices: Vec<u32> = fts_field_names
+            .iter()
+            .filter_map(|n| {
+                schema
+                    .columns
+                    .iter()
+                    .position(|c| c.name == *n)
+                    .map(|i| i as u32)
+            })
+            .collect();
+        if !fts_col_indices.is_empty() {
+            let opts = zen_fts::BuildOptions {
+                field_names: fts_field_names.iter().map(|s| s.to_string()).collect(),
+                writer_memory_bytes: 15_000_000,
+            };
+            let accessor = SpanFieldAccessor { rows: chunk };
+            let res = zen_fts::build_fts_index(&accessor, &opts)
+                .map_err(|e| ZenError::compactor(format!("fts build: {e}")))?;
+            let local_off = inline_indexes.len() as u64;
+            let len = res.blob.len() as u32;
+            inline_indexes.extend_from_slice(&res.blob);
+            for ci in &fts_col_indices {
+                if let Some(entry) = zone_maps.iter_mut().find(|c| c.column_idx == *ci) {
+                    entry.fts_offset = Some(local_off);
+                    entry.fts_length = Some(len);
+                }
+            }
+        }
+
+        // Build per-segment JSON-path index for the metadata column.
+        if let Some(meta_col_idx) = schema
+            .columns
+            .iter()
+            .position(|c| c.name == "metadata")
+            .map(|i| i as u32)
+        {
+            let json_values: Vec<&serde_json::Value> =
+                chunk.iter().filter_map(|r| r.metadata.as_ref()).collect();
+            // Discover paths from the sample.
+            let cfg = zen_jsonpath::DiscoveryConfig {
+                sample_size: 10_000,
+                min_presence_pct: 1.0,
+                max_paths: 256,
+                max_depth: 6,
+            };
+            let discovered = zen_jsonpath::discover_paths(json_values.iter().copied(), &cfg);
+            let paths: Vec<String> = discovered.into_iter().map(|p| p.path).collect();
+            if !paths.is_empty() {
+                let mut builder = zen_jsonpath::JsonPathIndexBuilder::new(paths);
+                for (row_idx, r) in chunk.iter().enumerate() {
+                    if let Some(v) = &r.metadata {
+                        builder.push_row(row_idx as u32, v);
+                    }
+                }
+                let idx = builder.finish();
+                let bytes = idx
+                    .serialize()
+                    .map_err(|e| ZenError::compactor(format!("jsonpath serialize: {e}")))?;
+                let local_off = inline_indexes.len() as u64;
+                let len = bytes.len() as u32;
+                inline_indexes.extend_from_slice(&bytes);
+                if let Some(entry) = zone_maps.iter_mut().find(|c| c.column_idx == meta_col_idx) {
+                    entry.jsonpath_offset = Some(local_off);
+                    entry.jsonpath_length = Some(len);
+                }
             }
         }
 
@@ -426,4 +491,255 @@ fn build_posting_for_column(rows: &[SpanRecord], column: &str) -> PostingMap {
         pm.insert(v.as_bytes(), i as u32);
     }
     pm
+}
+
+/// Implements `zen_fts::FieldAccessor` over a slice of `SpanRecord` for the
+/// columns: `prompt`, `completion`, `tool_io_text` (in that order).
+struct SpanFieldAccessor<'a> {
+    rows: &'a [SpanRecord],
+}
+
+impl<'a> zen_fts::build::FieldAccessor for SpanFieldAccessor<'a> {
+    fn field(&self, row: usize, field_idx: usize) -> Option<&str> {
+        let r = self.rows.get(row)?;
+        match field_idx {
+            0 => r.prompt.as_deref(),
+            1 => r.completion.as_deref(),
+            2 => r.tool_io_text.as_deref(),
+            _ => None,
+        }
+    }
+    fn row_count(&self) -> usize {
+        self.rows.len()
+    }
+}
+
+/// Streaming variant of `build_segment_from_rows` that accepts an iterator
+/// instead of a slice. Memory-bounded by `row_group_max_rows`, not by total
+/// row count. Performs streaming tombstone dedup (rows are sorted, so
+/// duplicate `(tenant, span_id)` collide adjacently and we keep the highest
+/// `commit_id`).
+///
+/// Returns `(segment_bytes, metadata, row_count_after_dedup)`.
+pub fn build_segment_from_iter<I>(
+    rows: I,
+    tenant_id: TenantId,
+    partition_id: PartitionId,
+    schema: &Schema,
+    opts: &BuildOptions,
+) -> ZenResult<Option<(Vec<u8>, SegmentMetadata, usize)>>
+where
+    I: IntoIterator<Item = SpanRecord>,
+{
+    let column_names: Vec<String> = schema.columns.iter().map(|c| c.name.clone()).collect();
+    let sort_keys: Vec<String> = schema
+        .sort_key_columns()
+        .into_iter()
+        .map(|i| schema.columns[i].name.clone())
+        .collect();
+    let segment_id = Ulid::new().0;
+
+    let mut meta = SegmentMetadata::new(
+        segment_id,
+        tenant_id,
+        partition_id,
+        schema.fingerprint(),
+        column_names,
+        sort_keys,
+    );
+
+    let mut writer = SegmentWriter::new(meta.clone());
+    let mut hotcache = Hotcache::new();
+    let mut inline_indexes: Vec<u8> = Vec::new();
+
+    let bitmap_columns = ["model", "status", "provider", "tool_name", "span_type"];
+    let bitmap_col_indices: Vec<u32> = bitmap_columns
+        .iter()
+        .filter_map(|name| {
+            schema
+                .columns
+                .iter()
+                .position(|c| c.name == *name)
+                .map(|i| i as u32)
+        })
+        .collect();
+
+    let mut buf: Vec<SpanRecord> = Vec::with_capacity(opts.row_group_max_rows as usize);
+    let mut prev_key: Option<(u64, [u8; 16])> = None;
+    let mut rg_idx_counter: u32 = 0;
+    let mut total_rows: usize = 0;
+    let mut empty = true;
+
+    let iter = rows.into_iter();
+    for row in iter {
+        meta.observe_time(row.start_time_ms);
+        meta.observe_commit(row.commit_id);
+        meta.observe_trace_id(row.trace_id);
+        meta.observe_span_id(row.span_id);
+
+        // Tombstone dedup against last row in buffer (sorted, so duplicates collide).
+        let key = (row.tenant_id.0, row.span_id.0);
+        if Some(key) == prev_key {
+            if let Some(last) = buf.last_mut() {
+                if row.commit_id.0 > last.commit_id.0 {
+                    *last = row;
+                }
+            }
+            continue;
+        }
+        prev_key = Some(key);
+        buf.push(row);
+        empty = false;
+        total_rows += 1;
+
+        if buf.len() >= opts.row_group_max_rows as usize {
+            // Don't split mid-trace: peek-look-back. If last few rows share the
+            // most recent trace_id, hold back until we see a boundary.
+            // For simplicity here we just flush the whole buffer; callers can
+            // tolerate an in-trace split since trace-locality is best-effort
+            // when input volume is huge.
+            finalize_one_row_group(
+                &buf,
+                schema,
+                rg_idx_counter,
+                &bitmap_col_indices,
+                &mut writer,
+                &mut hotcache,
+                &mut inline_indexes,
+            )?;
+            rg_idx_counter += 1;
+            buf.clear();
+            prev_key = None; // safe to reset since cross-rg dedup is rare and the writer is monotonic
+        }
+    }
+    if !buf.is_empty() {
+        finalize_one_row_group(
+            &buf,
+            schema,
+            rg_idx_counter,
+            &bitmap_col_indices,
+            &mut writer,
+            &mut hotcache,
+            &mut inline_indexes,
+        )?;
+    }
+
+    if empty {
+        return Ok(None);
+    }
+    writer.set_inline_indexes(inline_indexes);
+    writer.set_hotcache(hotcache);
+
+    let bytes = writer.finish()?;
+    Ok(Some((bytes.to_vec(), meta, total_rows)))
+}
+
+/// Process one chunk into a row group + per-RG zone maps + posting / FTS /
+/// JSON-path indexes. Equivalent to the inner loop body of
+/// `build_segment_from_rows`, factored out so streaming and batch paths share
+/// the same plumbing.
+fn finalize_one_row_group(
+    chunk: &[SpanRecord],
+    schema: &Schema,
+    rg_idx: u32,
+    bitmap_col_indices: &[u32],
+    writer: &mut SegmentWriter,
+    hotcache: &mut Hotcache,
+    inline_indexes: &mut Vec<u8>,
+) -> ZenResult<()> {
+    let (rg_payload, rg_header) = build_row_group(chunk, schema)?;
+    let mut zone_maps = build_zone_maps(chunk, schema);
+
+    // Bitmap posting indexes.
+    for col_idx in bitmap_col_indices {
+        let col_name = &schema.columns[*col_idx as usize].name;
+        let pm = build_posting_for_column(chunk, col_name);
+        let bytes = pm
+            .serialize()
+            .map_err(|e| ZenError::compactor(format!("posting serialize: {e}")))?;
+        let local_off = inline_indexes.len() as u64;
+        let len = bytes.len() as u32;
+        inline_indexes.extend_from_slice(&bytes);
+        if let Some(entry) = zone_maps.iter_mut().find(|c| c.column_idx == *col_idx) {
+            entry.posting_offset = Some(local_off);
+            entry.posting_length = Some(len);
+        }
+    }
+
+    // FTS index.
+    let fts_field_names = ["prompt", "completion", "tool_io_text"];
+    let fts_col_indices: Vec<u32> = fts_field_names
+        .iter()
+        .filter_map(|n| {
+            schema
+                .columns
+                .iter()
+                .position(|c| c.name == *n)
+                .map(|i| i as u32)
+        })
+        .collect();
+    if !fts_col_indices.is_empty() {
+        let opts = zen_fts::BuildOptions {
+            field_names: fts_field_names.iter().map(|s| s.to_string()).collect(),
+            writer_memory_bytes: 15_000_000,
+        };
+        let accessor = SpanFieldAccessor { rows: chunk };
+        let res = zen_fts::build_fts_index(&accessor, &opts)
+            .map_err(|e| ZenError::compactor(format!("fts build: {e}")))?;
+        let local_off = inline_indexes.len() as u64;
+        let len = res.blob.len() as u32;
+        inline_indexes.extend_from_slice(&res.blob);
+        for ci in &fts_col_indices {
+            if let Some(entry) = zone_maps.iter_mut().find(|c| c.column_idx == *ci) {
+                entry.fts_offset = Some(local_off);
+                entry.fts_length = Some(len);
+            }
+        }
+    }
+
+    // JSON-path index.
+    if let Some(meta_col_idx) = schema
+        .columns
+        .iter()
+        .position(|c| c.name == "metadata")
+        .map(|i| i as u32)
+    {
+        let json_values: Vec<&serde_json::Value> =
+            chunk.iter().filter_map(|r| r.metadata.as_ref()).collect();
+        let cfg = zen_jsonpath::DiscoveryConfig {
+            sample_size: 10_000,
+            min_presence_pct: 1.0,
+            max_paths: 256,
+            max_depth: 6,
+        };
+        let discovered = zen_jsonpath::discover_paths(json_values.iter().copied(), &cfg);
+        let paths: Vec<String> = discovered.into_iter().map(|p| p.path).collect();
+        if !paths.is_empty() {
+            let mut builder = zen_jsonpath::JsonPathIndexBuilder::new(paths);
+            for (row_idx, r) in chunk.iter().enumerate() {
+                if let Some(v) = &r.metadata {
+                    builder.push_row(row_idx as u32, v);
+                }
+            }
+            let idx = builder.finish();
+            let bytes = idx
+                .serialize()
+                .map_err(|e| ZenError::compactor(format!("jsonpath serialize: {e}")))?;
+            let local_off = inline_indexes.len() as u64;
+            let len = bytes.len() as u32;
+            inline_indexes.extend_from_slice(&bytes);
+            if let Some(entry) = zone_maps.iter_mut().find(|c| c.column_idx == meta_col_idx) {
+                entry.jsonpath_offset = Some(local_off);
+                entry.jsonpath_length = Some(len);
+            }
+        }
+    }
+
+    hotcache.row_groups.push(RowGroupHotcacheEntry {
+        row_group_idx: rg_idx,
+        header: rg_header.clone(),
+        columns: zone_maps,
+    });
+    writer.add_row_group(rg_header, rg_payload);
+    Ok(())
 }

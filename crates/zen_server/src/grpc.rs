@@ -5,7 +5,6 @@ use tonic::{Request, Response, Status};
 
 use zen_catalog::model::WalObjectRow;
 use zen_common::{CommitId, PartitionId, Schema, SpanId, SpanRecord, TenantId, TraceId};
-use zen_memtable::flush_to_record_batch;
 use zen_proto::v1::{
     ingest_service_server::{IngestService, IngestServiceServer},
     query_service_server::{QueryService, QueryServiceServer},
@@ -81,10 +80,26 @@ impl IngestService for GrpcIngest {
                 tool_name: opt(&s.tool_name),
                 prompt: opt(&s.prompt),
                 completion: opt(&s.completion),
-                prompt_tokens: if s.prompt_tokens == 0 { None } else { Some(s.prompt_tokens) },
-                completion_tokens: if s.completion_tokens == 0 { None } else { Some(s.completion_tokens) },
-                cost_usd: if s.cost_usd == 0.0 { None } else { Some(s.cost_usd) },
-                temperature: if s.temperature == 0.0 { None } else { Some(s.temperature) },
+                prompt_tokens: if s.prompt_tokens == 0 {
+                    None
+                } else {
+                    Some(s.prompt_tokens)
+                },
+                completion_tokens: if s.completion_tokens == 0 {
+                    None
+                } else {
+                    Some(s.completion_tokens)
+                },
+                cost_usd: if s.cost_usd == 0.0 {
+                    None
+                } else {
+                    Some(s.cost_usd)
+                },
+                temperature: if s.temperature == 0.0 {
+                    None
+                } else {
+                    Some(s.temperature)
+                },
                 top_p: if s.top_p == 0.0 { None } else { Some(s.top_p) },
                 tool_io_text: opt(&s.tool_io_text),
                 user_id: opt(&s.user_id),
@@ -106,9 +121,7 @@ impl IngestService for GrpcIngest {
 
         let mt = self.state.memtable_for(tenant, partition);
         mt.append_many(records);
-        let batch = mt
-            .flush()
-            .map_err(|e| Status::internal(format!("{e}")))?;
+        let batch = mt.flush().map_err(|e| Status::internal(format!("{e}")))?;
         let writer = WalWriter::new(self.state.store.clone());
         let key = writer
             .flush(
@@ -151,10 +164,7 @@ pub struct GrpcQuery {
 
 #[tonic::async_trait]
 impl QueryService for GrpcQuery {
-    async fn query(
-        &self,
-        req: Request<QueryRequest>,
-    ) -> Result<Response<QueryResponse>, Status> {
+    async fn query(&self, req: Request<QueryRequest>) -> Result<Response<QueryResponse>, Status> {
         let req = req.into_inner();
         let plan = zen_ql::parse(&req.query, req.tenant_id)
             .map_err(|e| Status::invalid_argument(format!("parse: {e}")))?;
@@ -181,7 +191,9 @@ pub async fn serve(
     addr: &str,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let addr: std::net::SocketAddr = addr.parse()?;
-    let ingest = GrpcIngest { state: state.clone() };
+    let ingest = GrpcIngest {
+        state: state.clone(),
+    };
     let query = GrpcQuery { state };
     tracing::info!(%addr, "zenithdb grpc listening");
     tonic::transport::Server::builder()

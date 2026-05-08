@@ -24,11 +24,7 @@ pub struct MemTable {
 }
 
 impl MemTable {
-    pub fn new(
-        tenant_id: TenantId,
-        partition_id: PartitionId,
-        flush_max_bytes: u64,
-    ) -> Self {
+    pub fn new(tenant_id: TenantId, partition_id: PartitionId, flush_max_bytes: u64) -> Self {
         Self {
             tenant_id,
             partition_id,
@@ -108,7 +104,9 @@ fn estimate_size(r: &SpanRecord) -> u64 {
         s += t.len() as u64;
     }
     if let Some(m) = &r.metadata {
-        s += serde_json::to_string(m).map(|j| j.len() as u64).unwrap_or(64);
+        s += serde_json::to_string(m)
+            .map(|j| j.len() as u64)
+            .unwrap_or(64);
     }
     if let Some(e) = &r.embedding {
         s += (e.len() * 4) as u64;

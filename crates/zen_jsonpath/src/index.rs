@@ -9,44 +9,45 @@ use xxhash_rust::xxh3::xxh3_64;
 
 use zen_common::{ZenError, ZenResult};
 
-use crate::discovery::{walk, DiscoveredPath};
+use crate::discovery::walk;
 
 pub struct JsonPathIndexBuilder {
     /// `path_id` → posting maps from `value_hash` → row mask.
     pub paths: Vec<String>,
     pub posting: HashMap<u32, HashMap<u64, RoaringBitmap>>,
+    path_to_id: HashMap<String, u32>,
 }
 
 impl JsonPathIndexBuilder {
     pub fn new(paths: Vec<String>) -> Self {
+        let path_to_id = paths
+            .iter()
+            .enumerate()
+            .map(|(idx, path)| (path.clone(), idx as u32))
+            .collect();
         Self {
             paths,
             posting: HashMap::new(),
+            path_to_id,
         }
     }
 
     /// Push row `row` for json `v`. Only paths in `self.paths` are indexed.
     pub fn push_row(&mut self, row: u32, v: &Value) {
-        let want: std::collections::HashSet<&str> =
-            self.paths.iter().map(|s| s.as_str()).collect();
-        let paths_clone = self.paths.clone();
-        let mut local: Vec<(String, Option<String>)> = Vec::new();
+        let mut local: Vec<(u32, String)> = Vec::new();
         walk(v, "", 0, 8, &mut |path, scalar| {
-            if want.contains(path) {
-                local.push((path.to_string(), scalar.map(str::to_string)));
+            if let (Some(&path_id), Some(scalar)) = (self.path_to_id.get(path), scalar) {
+                local.push((path_id, scalar.to_string()));
             }
         });
-        for (path, scalar) in local {
-            if let Some(s) = scalar {
-                let path_id = paths_clone.iter().position(|p| p == &path).unwrap() as u32;
-                let h = xxh3_64(s.as_bytes());
-                self.posting
-                    .entry(path_id)
-                    .or_default()
-                    .entry(h)
-                    .or_default()
-                    .insert(row);
-            }
+        for (path_id, scalar) in local {
+            let h = xxh3_64(scalar.as_bytes());
+            self.posting
+                .entry(path_id)
+                .or_default()
+                .entry(h)
+                .or_default()
+                .insert(row);
         }
     }
 
@@ -72,6 +73,67 @@ impl JsonPathIndex {
 
     pub fn knows_path(&self, path: &str) -> bool {
         self.paths.iter().any(|p| p == path)
+    }
+
+    pub fn lookup_serialized(
+        input: &[u8],
+        path: &str,
+        value: &str,
+    ) -> ZenResult<Option<RoaringBitmap>> {
+        let mut p = input;
+        if p.remaining() < 4 {
+            return Err(ZenError::format("json path index header truncated"));
+        }
+        let np = p.get_u32_le() as usize;
+        let mut target_path_id = None;
+        let path_bytes = path.as_bytes();
+        for path_id in 0..np {
+            if p.remaining() < 4 {
+                return Err(ZenError::format("path entry truncated"));
+            }
+            let l = p.get_u32_le() as usize;
+            if p.remaining() < l {
+                return Err(ZenError::format("path body truncated"));
+            }
+            if &p[..l] == path_bytes {
+                target_path_id = Some(path_id as u32);
+            }
+            p.advance(l);
+        }
+
+        let Some(target_path_id) = target_path_id else {
+            return Ok(None);
+        };
+
+        if p.remaining() < 4 {
+            return Err(ZenError::format("posting count truncated"));
+        }
+        let n_lists = p.get_u32_le() as usize;
+        let value_hash = xxh3_64(value.as_bytes());
+        for _ in 0..n_lists {
+            if p.remaining() < 8 {
+                return Err(ZenError::format("posting header truncated"));
+            }
+            let pid = p.get_u32_le();
+            let n_h = p.get_u32_le() as usize;
+            for _ in 0..n_h {
+                if p.remaining() < 12 {
+                    return Err(ZenError::format("hash entry header truncated"));
+                }
+                let h = p.get_u64_le();
+                let l = p.get_u32_le() as usize;
+                if p.remaining() < l {
+                    return Err(ZenError::format("hash entry body truncated"));
+                }
+                if pid == target_path_id && h == value_hash {
+                    let bm = RoaringBitmap::deserialize_from(std::io::Cursor::new(&p[..l]))
+                        .map_err(|e| ZenError::format(format!("roaring deserialize: {e}")))?;
+                    return Ok(Some(bm));
+                }
+                p.advance(l);
+            }
+        }
+        Ok(Some(RoaringBitmap::new()))
     }
 
     pub fn serialize(&self) -> ZenResult<Bytes> {
@@ -181,6 +243,18 @@ mod tests {
         assert_eq!(bm.len(), 20);
 
         let bytes = idx.serialize().unwrap();
+        let direct = JsonPathIndex::lookup_serialized(&bytes, "user_id", "u-3")
+            .unwrap()
+            .unwrap();
+        assert_eq!(direct.len(), 20);
+        let absent = JsonPathIndex::lookup_serialized(&bytes, "user_id", "u-missing")
+            .unwrap()
+            .unwrap();
+        assert!(absent.is_empty());
+        assert!(JsonPathIndex::lookup_serialized(&bytes, "missing", "x")
+            .unwrap()
+            .is_none());
+
         let idx2 = JsonPathIndex::deserialize(&bytes).unwrap();
         let bm2 = idx2.lookup("user_id", "u-3").unwrap();
         assert_eq!(bm2.len(), 20);

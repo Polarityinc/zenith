@@ -22,7 +22,10 @@ impl Leaderboard {
         s.push_str("| Benchmark | p50 (µs) | p95 (µs) | p99 (µs) | samples | Brainstore Linux p95 (µs, ref) |\n");
         s.push_str("|---|---:|---:|---:|---:|---:|\n");
         for r in results {
-            let bs_p95 = bs.get(r.name.as_str()).map(|(_, p)| format!("{:.0}", p)).unwrap_or_else(|| "(no ref)".into());
+            let bs_p95 = bs
+                .get(r.name.as_str())
+                .map(|(_, p)| format!("{:.0}", p))
+                .unwrap_or_else(|| "(no ref)".into());
             s.push_str(&format!(
                 "| {} | {:.0} | {:.0} | {:.0} | {} | {} |\n",
                 r.name, r.p50_us, r.p95_us, r.p99_us, r.n, bs_p95

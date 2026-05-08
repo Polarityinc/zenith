@@ -1,0 +1,37 @@
+[package]
+name = "zen_cluster"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+zen_common = { workspace = true }
+zen_catalog = { workspace = true }
+zen_query = { workspace = true }
+zen_storage = { workspace = true }
+zen_auth = { workspace = true }
+arrow = { workspace = true }
+arrow-array = { workspace = true }
+arrow-ipc = { workspace = true }
+arrow-schema = { workspace = true }
+async-trait = { workspace = true }
+tokio = { workspace = true }
+tokio-stream = { workspace = true }
+futures = { workspace = true }
+reqwest = { workspace = true }
+url = "2"
+serde = { workspace = true }
+serde_json = { workspace = true }
+bytes = { workspace = true }
+uuid = { workspace = true }
+chrono = { workspace = true }
+xxhash-rust = { workspace = true }
+ahash = { workspace = true }
+parking_lot = "0.12"
+sqlx = { workspace = true }
+thiserror = { workspace = true }
+tracing = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }

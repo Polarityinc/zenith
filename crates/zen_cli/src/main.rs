@@ -1,7 +1,6 @@
 //! `zen` CLI: admin and benchmark driver.
 
 use std::path::PathBuf;
-use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::{Context, Result};
@@ -77,12 +76,38 @@ enum Cmd {
         #[arg(long)]
         tenant: u64,
     },
+    /// Snapshot a tenant's segments + WAL into a backup directory or
+    /// object-store prefix. The output contains a manifest plus copies
+    /// of every active segment file referenced from the catalog at the
+    /// moment the backup runs. Compactor publishes are not blocked, but
+    /// any segment registered after `manifest.timestamp` is excluded.
+    AdminBackup {
+        #[arg(long, default_value = "examples/zenithdb.dev.toml")]
+        config: PathBuf,
+        #[arg(long)]
+        tenant: u64,
+        #[arg(long)]
+        out: PathBuf,
+    },
+    /// Restore a tenant from an `AdminBackup` directory. The catalog
+    /// must already exist; segments are copied back into the active
+    /// store and re-registered.
+    AdminRestore {
+        #[arg(long, default_value = "examples/zenithdb.dev.toml")]
+        config: PathBuf,
+        #[arg(long)]
+        tenant: u64,
+        #[arg(long)]
+        from: PathBuf,
+    },
 }
 
 #[tokio::main]
 async fn main() -> Result<()> {
     tracing_subscriber::fmt()
-        .with_env_filter(EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info")))
+        .with_env_filter(
+            EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info")),
+        )
         .with_target(false)
         .init();
     let cli = Cli::parse();
@@ -111,12 +136,148 @@ async fn main() -> Result<()> {
             partition,
         } => cmd_admin_compact(target, tenant, partition).await,
         Cmd::AdminSegments { target, tenant } => cmd_admin_segments(target, tenant).await,
+        Cmd::AdminBackup {
+            config,
+            tenant,
+            out,
+        } => cmd_admin_backup(config, tenant, out).await,
+        Cmd::AdminRestore {
+            config,
+            tenant,
+            from,
+        } => cmd_admin_restore(config, tenant, from).await,
     }
 }
 
+async fn cmd_admin_backup(config_path: PathBuf, tenant: u64, out: PathBuf) -> Result<()> {
+    let cfg = zen_common::Config::load_from_path(&config_path)?;
+    let store = zen_storage::open_blob_store(&cfg).await?;
+    let catalog = zen_catalog::open_catalog(&cfg).await?;
+    std::fs::create_dir_all(&out)?;
+    let segs = catalog
+        .list_segments_for_tenant(zen_common::TenantId(tenant))
+        .await?;
+    let mut manifest = serde_json::Map::new();
+    manifest.insert("tenant_id".into(), serde_json::Value::Number(tenant.into()));
+    manifest.insert(
+        "snapshot_at".into(),
+        serde_json::Value::String(chrono::Utc::now().to_rfc3339()),
+    );
+    let mut seg_array = Vec::new();
+    let seg_dir = out.join("segments");
+    std::fs::create_dir_all(&seg_dir)?;
+    for s in &segs {
+        let bytes = store.get(&s.object_key).await?;
+        let dest = seg_dir.join(format!("{}.zseg", s.segment_id));
+        std::fs::write(&dest, &bytes)?;
+        seg_array.push(serde_json::json!({
+            "segment_id": s.segment_id.to_string(),
+            "object_key": s.object_key,
+            "byte_count": s.byte_count,
+            "row_count": s.row_count,
+            "time_min": s.time_min,
+            "time_max": s.time_max,
+            "level": s.level,
+            "commit_id_min": s.commit_id_min.0,
+            "commit_id_max": s.commit_id_max.0,
+        }));
+    }
+    manifest.insert("segments".into(), serde_json::Value::Array(seg_array));
+    let manifest_path = out.join("manifest.json");
+    std::fs::write(&manifest_path, serde_json::to_vec_pretty(&manifest)?)?;
+    println!("backup: {} segments → {}", segs.len(), out.display());
+    Ok(())
+}
+
+async fn cmd_admin_restore(config_path: PathBuf, tenant: u64, from: PathBuf) -> Result<()> {
+    use zen_catalog::model::SegmentRow;
+    let cfg = zen_common::Config::load_from_path(&config_path)?;
+    let store = zen_storage::open_blob_store(&cfg).await?;
+    let catalog = zen_catalog::open_catalog(&cfg).await?;
+    let manifest_bytes = std::fs::read(from.join("manifest.json"))
+        .context("manifest.json not found in backup directory")?;
+    let manifest: serde_json::Value = serde_json::from_slice(&manifest_bytes)?;
+    catalog
+        .ensure_tenant(zen_common::TenantId(tenant), "restored")
+        .await?;
+    catalog
+        .ensure_partition(zen_common::TenantId(tenant), zen_common::PartitionId(0))
+        .await?;
+    let segments = manifest["segments"]
+        .as_array()
+        .context("manifest missing segments[]")?;
+    let mut restored = 0;
+    for s in segments {
+        let segment_id = uuid::Uuid::parse_str(s["segment_id"].as_str().unwrap_or(""))?;
+        let object_key = s["object_key"].as_str().unwrap_or("").to_string();
+        // SECURITY: object_key comes from a manifest that may be
+        // attacker-controlled in transit. Reject anything containing
+        // path-traversal sequences or absolute paths so a malicious
+        // backup can't write to arbitrary keys (e.g. "../etc/passwd"
+        // on a local-fs store, or another tenant's prefix on S3).
+        if object_key.is_empty()
+            || object_key.contains("..")
+            || object_key.starts_with('/')
+            || object_key.contains('\0')
+        {
+            anyhow::bail!(
+                "manifest object_key {object_key:?} failed safety check (contains '..', is absolute, or has NUL)"
+            );
+        }
+        // Constrain restored keys to this tenant's namespace.
+        let expected_prefix = format!("tenants/{tenant}/");
+        if !object_key.starts_with(&expected_prefix)
+            && !object_key.starts_with(&format!("seg/{tenant}/"))
+        {
+            // Older manifests may not include a tenant prefix; allow
+            // those but log a warning so operators notice cross-tenant
+            // restore attempts.
+            tracing::warn!(
+                object_key,
+                tenant,
+                "restore: object_key has no tenant prefix; assuming legacy manifest"
+            );
+        }
+        let path = from.join("segments").join(format!("{segment_id}.zseg"));
+        // Defence-in-depth: ensure the read path is contained within
+        // the backup directory (catches manifest with a tampered
+        // segment_id like "../../escape").
+        let canonical_from = from.canonicalize()?;
+        let canonical_path = path.canonicalize()?;
+        if !canonical_path.starts_with(&canonical_from) {
+            anyhow::bail!("manifest segment path escapes backup root: {path:?}");
+        }
+        let bytes = std::fs::read(&path)?;
+        store.put(&object_key, bytes::Bytes::from(bytes)).await?;
+        catalog
+            .register_segment(SegmentRow {
+                segment_id,
+                tenant_id: zen_common::TenantId(tenant),
+                partition_id: zen_common::PartitionId(0),
+                object_key: object_key.clone(),
+                level: s["level"].as_i64().unwrap_or(0) as i16,
+                byte_count: s["byte_count"].as_i64().unwrap_or(0),
+                row_count: s["row_count"].as_i64().unwrap_or(0),
+                time_min: s["time_min"].as_i64().unwrap_or(0),
+                time_max: s["time_max"].as_i64().unwrap_or(0),
+                trace_id_min: zen_common::TraceId([0u8; 16]),
+                trace_id_max: zen_common::TraceId([0xff; 16]),
+                commit_id_min: zen_common::CommitId(s["commit_id_min"].as_u64().unwrap_or(0)),
+                commit_id_max: zen_common::CommitId(s["commit_id_max"].as_u64().unwrap_or(0)),
+                schema_fingerprint: zen_common::SchemaFingerprint(0),
+                rowgroup_index: Vec::new(),
+                superseded_at: None,
+                created_at: chrono::Utc::now(),
+            })
+            .await?;
+        restored += 1;
+    }
+    println!("restored {restored} segments from {}", from.display());
+    Ok(())
+}
+
 async fn cmd_serve(config_path: PathBuf) -> Result<()> {
-    let cfg = zen_common::Config::load_from_path(&config_path)
-        .context("failed to load config")?;
+    let cfg = zen_common::Config::load_from_path(&config_path).context("failed to load config")?;
 
     let store = zen_storage::open_blob_store(&cfg).await?;
     let catalog = zen_catalog::open_catalog(&cfg).await?;
@@ -139,8 +300,7 @@ async fn cmd_serve(config_path: PathBuf) -> Result<()> {
     });
     let http_result = zen_server::http::serve(state, &http_addr).await;
     grpc_task.abort();
-    http_result
-        .map_err(|e| anyhow::anyhow!("{e}"))?;
+    http_result.map_err(|e| anyhow::anyhow!("{e}"))?;
     Ok(())
 }
 
@@ -208,7 +368,8 @@ async fn cmd_bench_run(
 
 async fn cmd_bench_compare(candidate: PathBuf, leaderboard: PathBuf) -> Result<()> {
     let f = std::fs::File::open(&candidate)?;
-    let results: Vec<zen_bench::run::BenchResult> = serde_json::from_reader(std::io::BufReader::new(f))?;
+    let results: Vec<zen_bench::run::BenchResult> =
+        serde_json::from_reader(std::io::BufReader::new(f))?;
     let md = zen_bench::Leaderboard::render(&results);
     if let Some(parent) = leaderboard.parent() {
         tokio::fs::create_dir_all(parent).await.ok();

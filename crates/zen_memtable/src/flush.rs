@@ -3,7 +3,8 @@
 use std::sync::Arc;
 
 use arrow_array::builder::{
-    FixedSizeBinaryBuilder, Float64Builder, Int64Builder, StringBuilder, UInt32Builder, UInt64Builder,
+    FixedSizeBinaryBuilder, Float64Builder, Int64Builder, StringBuilder, UInt32Builder,
+    UInt64Builder,
 };
 use arrow_array::{ArrayRef, RecordBatch};
 
@@ -110,8 +111,7 @@ pub fn flush_to_record_batch(rows: &[SpanRecord]) -> ZenResult<RecordBatch> {
         Arc::new(commit_id.finish()),
     ];
     let schema = spans_arrow_schema();
-    RecordBatch::try_new(schema, arrays)
-        .map_err(|e| ZenError::format(format!("record batch: {e}")))
+    RecordBatch::try_new(schema, arrays).map_err(|e| ZenError::format(format!("record batch: {e}")))
 }
 
 fn push_opt_str(b: &mut arrow_array::builder::StringBuilder, v: Option<&str>) {

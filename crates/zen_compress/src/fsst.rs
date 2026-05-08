@@ -41,7 +41,7 @@ pub struct FsstCompressor {
 impl FsstCompressor {
     /// Train a symbol table on a sample of input rows.
     pub fn train(samples: &[&[u8]]) -> Self {
-        let v: Vec<&[u8]> = samples.iter().copied().collect();
+        let v: Vec<&[u8]> = samples.to_vec();
         let compressor = Compressor::train(&v);
         Self { compressor }
     }

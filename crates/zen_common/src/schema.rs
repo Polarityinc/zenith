@@ -153,8 +153,7 @@ impl Schema {
             ColumnSpec::new("session_id", ColumnType::Utf8),
             ColumnSpec::new("request_id", ColumnType::Utf8),
             ColumnSpec::new("metadata", ColumnType::Json).with_index(IndexHint::JsonPath),
-            ColumnSpec::new("embedding", ColumnType::FloatVector(1536))
-                .with_index(IndexHint::Hnsw),
+            ColumnSpec::new("embedding", ColumnType::FloatVector(1536)).with_index(IndexHint::Hnsw),
             ColumnSpec::new("commit_id", ColumnType::UInt64).required(),
         ])
     }
