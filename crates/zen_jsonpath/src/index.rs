@@ -27,8 +27,7 @@ impl JsonPathIndexBuilder {
 
     /// Push row `row` for json `v`. Only paths in `self.paths` are indexed.
     pub fn push_row(&mut self, row: u32, v: &Value) {
-        let want: std::collections::HashSet<&str> =
-            self.paths.iter().map(|s| s.as_str()).collect();
+        let want: std::collections::HashSet<&str> = self.paths.iter().map(|s| s.as_str()).collect();
         let paths_clone = self.paths.clone();
         let mut local: Vec<(String, Option<String>)> = Vec::new();
         walk(v, "", 0, 8, &mut |path, scalar| {

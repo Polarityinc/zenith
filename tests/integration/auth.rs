@@ -124,6 +124,10 @@ async fn metrics_remains_public() {
     let client = reqwest::Client::new();
     // Anonymous, no auth header — should still work since /v1/metrics
     // is in the public router.
-    let r = client.get(format!("{url}/v1/metrics")).send().await.unwrap();
+    let r = client
+        .get(format!("{url}/v1/metrics"))
+        .send()
+        .await
+        .unwrap();
     assert!(r.status().is_success(), "metrics 2xx, got {}", r.status());
 }

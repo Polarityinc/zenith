@@ -30,7 +30,8 @@ async fn backup_then_restore_preserves_segments() {
     let store_a: Arc<dyn BlobStore> = Arc::new(InMemoryStore::default());
     let cat_a: Arc<dyn Catalog> = Arc::new(SqliteCatalog::open_in_memory().await.unwrap());
     cat_a.ensure_tenant(TenantId(1), "t").await.unwrap();
-    cat_a.ensure_partition(TenantId(1), PartitionId(0))
+    cat_a
+        .ensure_partition(TenantId(1), PartitionId(0))
         .await
         .unwrap();
 
@@ -89,11 +90,11 @@ async fn backup_then_restore_preserves_segments() {
 
     // BACKUP — replicate the CLI's logic against the live catalog/store.
     let backup_dir = TempDir::new().unwrap();
-    let segs_a = cat_a
-        .list_segments_for_tenant(TenantId(1))
-        .await
-        .unwrap();
-    assert!(!segs_a.is_empty(), "expected at least one segment after compact");
+    let segs_a = cat_a.list_segments_for_tenant(TenantId(1)).await.unwrap();
+    assert!(
+        !segs_a.is_empty(),
+        "expected at least one segment after compact"
+    );
     let seg_dir = backup_dir.path().join("segments");
     std::fs::create_dir_all(&seg_dir).unwrap();
     for s in &segs_a {
@@ -105,7 +106,8 @@ async fn backup_then_restore_preserves_segments() {
     let store_b: Arc<dyn BlobStore> = Arc::new(InMemoryStore::default());
     let cat_b: Arc<dyn Catalog> = Arc::new(SqliteCatalog::open_in_memory().await.unwrap());
     cat_b.ensure_tenant(TenantId(1), "t").await.unwrap();
-    cat_b.ensure_partition(TenantId(1), PartitionId(0))
+    cat_b
+        .ensure_partition(TenantId(1), PartitionId(0))
         .await
         .unwrap();
     for s in &segs_a {
@@ -139,10 +141,7 @@ async fn backup_then_restore_preserves_segments() {
     }
 
     // Verify: catalog B sees the same segments and the bytes match.
-    let segs_b = cat_b
-        .list_segments_for_tenant(TenantId(1))
-        .await
-        .unwrap();
+    let segs_b = cat_b.list_segments_for_tenant(TenantId(1)).await.unwrap();
     assert_eq!(segs_a.len(), segs_b.len());
     let row_count_a: i64 = segs_a.iter().map(|s| s.row_count).sum();
     let row_count_b: i64 = segs_b.iter().map(|s| s.row_count).sum();

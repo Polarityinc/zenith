@@ -108,14 +108,8 @@ async fn main() -> anyhow::Result<()> {
                 let sc = SegmentCache::new(128);
                 let lc = SegmentListCache::new(Duration::from_millis(0), 1024);
                 let t0 = Instant::now();
-                let _ = zen_query::execute_full(
-                    &plan,
-                    catalog.clone(),
-                    store.clone(),
-                    &sc,
-                    &lc,
-                )
-                .await?;
+                let _ = zen_query::execute_full(&plan, catalog.clone(), store.clone(), &sc, &lc)
+                    .await?;
                 times.push(t0.elapsed().as_micros() as f64);
             } else {
                 let t0 = Instant::now();

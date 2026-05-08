@@ -38,12 +38,10 @@ pub fn init() -> &'static PrometheusHandle {
             // (sub-millisecond to a few seconds). Coarser buckets keep the
             // exporter render cheap at scale.
             .set_buckets_for_metric(
-                metrics_exporter_prometheus::Matcher::Suffix(
-                    "_duration_seconds".to_string(),
-                ),
+                metrics_exporter_prometheus::Matcher::Suffix("_duration_seconds".to_string()),
                 &[
-                    0.0001, 0.0005, 0.001, 0.0025, 0.005, 0.01, 0.025, 0.05, 0.1, 0.25,
-                    0.5, 1.0, 2.5, 5.0, 10.0,
+                    0.0001, 0.0005, 0.001, 0.0025, 0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1.0,
+                    2.5, 5.0, 10.0,
                 ],
             )
             .unwrap_or_else(|_| PrometheusBuilder::new());
@@ -62,6 +60,8 @@ pub fn init() -> &'static PrometheusHandle {
 /// Lazily initializes the recorder on first scrape so the binary that
 /// hosts the router doesn't have to remember to call [`init`] up-front
 /// (the CLI does call it, but in-process integration tests forget).
-pub async fn handle_metrics(State(_state): State<ServerState>) -> Result<String, (StatusCode, String)> {
+pub async fn handle_metrics(
+    State(_state): State<ServerState>,
+) -> Result<String, (StatusCode, String)> {
     Ok(init().render())
 }

@@ -12,13 +12,28 @@ use zen_common::ZenError;
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub enum ZoneMapValue {
     Empty,
-    I64 { min: i64, max: i64 },
-    U64 { min: u64, max: u64 },
-    F64 { min: f64, max: f64 },
+    I64 {
+        min: i64,
+        max: i64,
+    },
+    U64 {
+        min: u64,
+        max: u64,
+    },
+    F64 {
+        min: f64,
+        max: f64,
+    },
     /// Stored as canonical bytes; for utf8 columns this is the raw utf8 bytes.
-    Bytes { min: Vec<u8>, max: Vec<u8> },
+    Bytes {
+        min: Vec<u8>,
+        max: Vec<u8>,
+    },
     /// Used for fixed-width binary columns (TraceId, SpanId).
-    Fixed { min: Vec<u8>, max: Vec<u8> },
+    Fixed {
+        min: Vec<u8>,
+        max: Vec<u8>,
+    },
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -54,8 +69,12 @@ impl ZoneMap {
         let mut min = values[0];
         let mut max = values[0];
         for &v in &values[1..] {
-            if v < min { min = v; }
-            if v > max { max = v; }
+            if v < min {
+                min = v;
+            }
+            if v > max {
+                max = v;
+            }
         }
         Self {
             value: ZoneMapValue::I64 { min, max },
@@ -77,8 +96,12 @@ impl ZoneMap {
         let mut min = values[0];
         let mut max = values[0];
         for &v in &values[1..] {
-            if v < min { min = v; }
-            if v > max { max = v; }
+            if v < min {
+                min = v;
+            }
+            if v > max {
+                max = v;
+            }
         }
         Self {
             value: ZoneMapValue::U64 { min, max },
@@ -101,15 +124,21 @@ impl ZoneMap {
         let mut max = values[0];
         for &v in &values[1..] {
             if !v.is_nan() {
-                if v < min { min = v; }
-                if v > max { max = v; }
+                if v < min {
+                    min = v;
+                }
+                if v > max {
+                    max = v;
+                }
             }
         }
         Self {
             value: ZoneMapValue::F64 { min, max },
             null_count: nulls,
             row_count: values.len() as u32 + nulls,
-            distinct_estimate: hll_distinct_u64(&values.iter().map(|v| v.to_bits()).collect::<Vec<_>>()),
+            distinct_estimate: hll_distinct_u64(
+                &values.iter().map(|v| v.to_bits()).collect::<Vec<_>>(),
+            ),
         }
     }
 
@@ -125,8 +154,12 @@ impl ZoneMap {
         let mut min: &[u8] = values[0];
         let mut max: &[u8] = values[0];
         for v in &values[1..] {
-            if v < &min { min = v; }
-            if v > &max { max = v; }
+            if v < &min {
+                min = v;
+            }
+            if v > &max {
+                max = v;
+            }
         }
         Self {
             value: ZoneMapValue::Bytes {
@@ -150,16 +183,15 @@ impl ZoneMap {
 
     pub fn maybe_contains_bytes(&self, value: &[u8]) -> bool {
         match &self.value {
-            ZoneMapValue::Bytes { min, max } => {
-                value >= min.as_slice() && value <= max.as_slice()
-            }
+            ZoneMapValue::Bytes { min, max } => value >= min.as_slice() && value <= max.as_slice(),
             ZoneMapValue::Empty => false,
             _ => true,
         }
     }
 
     pub fn serialize(&self) -> Result<Bytes, ZenError> {
-        let s = serde_json::to_vec(self).map_err(|e| ZenError::format(format!("zonemap serialize: {e}")))?;
+        let s = serde_json::to_vec(self)
+            .map_err(|e| ZenError::format(format!("zonemap serialize: {e}")))?;
         let mut out = BytesMut::with_capacity(4 + s.len());
         out.put_u32_le(s.len() as u32);
         out.put_slice(&s);
@@ -319,7 +351,12 @@ mod tests {
         let est = hll_distinct_u64(&v);
         // 1024-bucket HLL should be accurate to ~5% on 10K distinct.
         let err = (est as f64 - 10_000.0).abs() / 10_000.0;
-        assert!(err < 0.10, "HLL error {} for 10K distinct (est={})", err, est);
+        assert!(
+            err < 0.10,
+            "HLL error {} for 10K distinct (est={})",
+            err,
+            est
+        );
     }
 
     #[test]

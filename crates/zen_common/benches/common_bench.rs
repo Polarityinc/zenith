@@ -1,5 +1,5 @@
 use criterion::{black_box, criterion_group, criterion_main, BatchSize, Criterion};
-use zen_common::{Schema, SchemaFingerprint, SpanId, SpanRecord, TenantId, PartitionId, TraceId};
+use zen_common::{PartitionId, Schema, SchemaFingerprint, SpanId, SpanRecord, TenantId, TraceId};
 
 fn bench_trace_id_roundtrip(c: &mut Criterion) {
     c.bench_function("trace_id_to_string_then_parse", |b| {

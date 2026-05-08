@@ -27,7 +27,11 @@ pub fn for_encode(values: &[i64]) -> Bytes {
         return b.freeze();
     }
     let frame = *values.iter().min().unwrap();
-    let max_delta: u64 = values.iter().map(|v| (*v - frame) as u64).max().unwrap_or(0);
+    let max_delta: u64 = values
+        .iter()
+        .map(|v| (*v - frame) as u64)
+        .max()
+        .unwrap_or(0);
     let width = if max_delta == 0 {
         0
     } else {
@@ -84,7 +88,11 @@ pub fn for_decompress(input: &[u8]) -> Result<Vec<i64>, ZenError> {
     let packed = &p[..needed_bytes];
     let mut acc: u64 = 0;
     let mut acc_bits: u8 = 0;
-    let mask = if width == 64 { u64::MAX } else { (1u64 << width) - 1 };
+    let mask = if width == 64 {
+        u64::MAX
+    } else {
+        (1u64 << width) - 1
+    };
     let mut out = Vec::with_capacity(count);
     let mut bi = 0usize;
     for _ in 0..count {

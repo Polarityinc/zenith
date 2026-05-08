@@ -30,10 +30,7 @@ pub enum EnvelopeError {
 /// Encrypt `plaintext` for at-rest storage. Generates a fresh data key,
 /// wraps it with the root key, and writes a self-describing header
 /// followed by the AES-256-GCM ciphertext + tag.
-pub fn encrypt(
-    plaintext: &[u8],
-    root: &dyn RootKey,
-) -> Result<Vec<u8>, EnvelopeError> {
+pub fn encrypt(plaintext: &[u8], root: &dyn RootKey) -> Result<Vec<u8>, EnvelopeError> {
     use aes_gcm::aead::{Aead, KeyInit, OsRng};
     use aes_gcm::{Aes256Gcm, Nonce};
 
@@ -104,8 +101,8 @@ pub fn decrypt(blob: &[u8], root: &dyn RootKey) -> Result<Vec<u8>, EnvelopeError
     let dk = root
         .unwrap(key_nonce, wrapped)
         .map_err(|e| EnvelopeError::Root(format!("{e}")))?;
-    let cipher = Aes256Gcm::new_from_slice(&dk.0)
-        .map_err(|e| EnvelopeError::Aead(format!("init: {e}")))?;
+    let cipher =
+        Aes256Gcm::new_from_slice(&dk.0).map_err(|e| EnvelopeError::Aead(format!("init: {e}")))?;
     let pt = cipher
         .decrypt(Nonce::from_slice(payload_nonce), ct)
         .map_err(|e| EnvelopeError::Aead(format!("decrypt: {e}")))?;

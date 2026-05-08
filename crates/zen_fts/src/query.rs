@@ -1,14 +1,15 @@
 //! Open a serialized Tantivy index blob and run queries against it.
 
-
 use bytes::Buf;
 use roaring::RoaringBitmap;
 use serde::{Deserialize, Serialize};
+use std::path::Path;
+
 use tantivy::collector::TopDocs;
+use tantivy::directory::{Directory, RamDirectory};
 use tantivy::query::{Query, QueryParser};
 use tantivy::schema::Field;
 use tantivy::{Index, IndexReader, ReloadPolicy};
-use tempfile::TempDir;
 
 use zen_common::{ZenError, ZenResult};
 
@@ -25,8 +26,6 @@ pub struct FtsHandle {
     pub field_names: Vec<String>,
     pub fields: Vec<Field>,
     pub row_idx_field: Field,
-    /// Held to keep the temp directory alive.
-    _dir: TempDir,
 }
 
 pub fn open_fts_index(blob: &[u8]) -> ZenResult<FtsHandle> {
@@ -42,23 +41,20 @@ pub fn open_fts_index(blob: &[u8]) -> ZenResult<FtsHandle> {
         .map_err(|e| ZenError::format(format!("manifest parse: {e}")))?;
     let payload = &p[manifest_len..];
 
-    let dir = TempDir::new().map_err(|e| ZenError::format(format!("temp dir: {e}")))?;
+    let dir = RamDirectory::create();
     for ent in &manifest {
-        let path = dir.path().join(&ent.name);
-        if let Some(parent) = path.parent() {
-            std::fs::create_dir_all(parent)
-                .map_err(|e| ZenError::format(format!("mkdir: {e}")))?;
+        if is_tantivy_lock_file(&ent.name) {
+            continue;
         }
         let s = ent.offset as usize;
         let e = (ent.offset + ent.length) as usize;
         if payload.len() < e {
             return Err(ZenError::format("FTS payload truncated"));
         }
-        std::fs::write(&path, &payload[s..e])
-            .map_err(|err| ZenError::format(format!("write file {path:?}: {err}")))?;
+        dir.atomic_write(Path::new(&ent.name), &payload[s..e])
+            .map_err(|err| ZenError::format(format!("ram write {}: {err}", ent.name)))?;
     }
-    let index = Index::open_in_dir(dir.path())
-        .map_err(|e| ZenError::format(format!("open index: {e}")))?;
+    let index = Index::open(dir).map_err(|e| ZenError::format(format!("open index: {e}")))?;
     let reader = index
         .reader_builder()
         .reload_policy(ReloadPolicy::Manual)
@@ -78,15 +74,14 @@ pub fn open_fts_index(blob: &[u8]) -> ZenResult<FtsHandle> {
             fields.push(f);
         }
     }
-    let row_idx_field = row_idx_field
-        .ok_or_else(|| ZenError::format("FTS index missing __row_idx field"))?;
+    let row_idx_field =
+        row_idx_field.ok_or_else(|| ZenError::format("FTS index missing __row_idx field"))?;
     Ok(FtsHandle {
         index,
         reader,
         field_names,
         fields,
         row_idx_field,
-        _dir: dir,
     })
 }
 
@@ -124,9 +119,22 @@ impl FtsHandle {
         let hits = searcher
             .search(&query, &top)
             .map_err(|e| ZenError::format(format!("search: {e}")))?;
+        let row_idx_cols: Vec<_> = searcher
+            .segment_readers()
+            .iter()
+            .map(|segment_reader| segment_reader.fast_fields().u64("__row_idx").ok())
+            .collect();
 
         let mut bm = RoaringBitmap::new();
         for (_, doc_addr) in hits {
+            if let Some(Some(row_idx_col)) = row_idx_cols.get(doc_addr.segment_ord as usize) {
+                if let Some(row_idx) = row_idx_col.first(doc_addr.doc_id) {
+                    bm.insert(row_idx as u32);
+                    continue;
+                }
+            }
+            // Backward-compatible path for older segment blobs built before
+            // __row_idx was a fast field.
             let doc: tantivy::TantivyDocument = searcher
                 .doc(doc_addr)
                 .map_err(|e| ZenError::format(format!("retrieve doc: {e}")))?;
@@ -146,6 +154,10 @@ fn extract_u64_from_value(v: &tantivy::schema::OwnedValue) -> Option<u64> {
         tantivy::schema::OwnedValue::I64(i) => Some(*i as u64),
         _ => None,
     }
+}
+
+fn is_tantivy_lock_file(path: &str) -> bool {
+    matches!(path, ".tantivy-writer.lock" | ".tantivy-meta.lock")
 }
 
 #[cfg(test)]
@@ -168,11 +180,27 @@ mod tests {
     fn corpus() -> StaticAccessor {
         StaticAccessor {
             rows: vec![
-                vec![Some("the quick brown fox".into()), Some("jumped over".into()), None],
-                vec![Some("out of memory error".into()), Some("on the gpu".into()), None],
-                vec![Some("rate limit exceeded".into()), Some("for tier free".into()), None],
+                vec![
+                    Some("the quick brown fox".into()),
+                    Some("jumped over".into()),
+                    None,
+                ],
+                vec![
+                    Some("out of memory error".into()),
+                    Some("on the gpu".into()),
+                    None,
+                ],
+                vec![
+                    Some("rate limit exceeded".into()),
+                    Some("for tier free".into()),
+                    None,
+                ],
                 vec![Some("hello world".into()), Some("greetings".into()), None],
-                vec![Some("out of memory while".into()), Some("allocating".into()), None],
+                vec![
+                    Some("out of memory while".into()),
+                    Some("allocating".into()),
+                    None,
+                ],
             ],
         }
     }

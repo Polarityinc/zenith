@@ -50,10 +50,7 @@ impl std::fmt::Display for WalObjectKey {
     }
 }
 
-pub fn build_wal_object(
-    header: WalHeader,
-    arrow_payload_zstd: Bytes,
-) -> ZenResult<Bytes> {
+pub fn build_wal_object(header: WalHeader, arrow_payload_zstd: Bytes) -> ZenResult<Bytes> {
     let mut out = BytesMut::with_capacity(40 + arrow_payload_zstd.len());
     out.put_slice(MAGIC);
     out.put_u32_le(FORMAT_VERSION);
@@ -79,7 +76,9 @@ pub fn parse_wal_object(bytes: &[u8]) -> ZenResult<(WalHeader, Bytes)> {
     let mut p = &bytes[8..];
     let version = p.get_u32_le();
     if version != FORMAT_VERSION {
-        return Err(ZenError::format(format!("WAL version {version} unsupported")));
+        return Err(ZenError::format(format!(
+            "WAL version {version} unsupported"
+        )));
     }
     let commit_id = CommitId(p.get_u64_le());
     let fp = SchemaFingerprint(p.get_u128_le());

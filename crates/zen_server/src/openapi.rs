@@ -12,8 +12,8 @@
 
 use axum::{extract::State, response::IntoResponse, Json};
 use utoipa::openapi::{
-    path::OperationBuilder, ContactBuilder, InfoBuilder, OpenApiBuilder, PathItem,
-    HttpMethod, PathsBuilder,
+    path::OperationBuilder, ContactBuilder, HttpMethod, InfoBuilder, OpenApiBuilder, PathItem,
+    PathsBuilder,
 };
 
 use crate::state::ServerState;
@@ -152,10 +152,7 @@ fn build_spec() -> utoipa::openapi::OpenApi {
         )
         .build();
 
-    OpenApiBuilder::new()
-        .info(info)
-        .paths(paths)
-        .build()
+    OpenApiBuilder::new().info(info).paths(paths).build()
 }
 
 use std::sync::OnceLock;

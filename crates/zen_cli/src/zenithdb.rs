@@ -68,8 +68,7 @@ fn install_tracing(cfg: &zen_common::Config) -> Result<()> {
 #[tokio::main]
 async fn main() -> Result<()> {
     let args = Args::parse();
-    let cfg = zen_common::Config::load_from_path(&args.config)
-        .context("failed to load config")?;
+    let cfg = zen_common::Config::load_from_path(&args.config).context("failed to load config")?;
     install_tracing(&cfg)?;
     // Initialize the global Prometheus recorder so metric calls in handlers
     // have somewhere to record. Idempotent — safe across reload paths.

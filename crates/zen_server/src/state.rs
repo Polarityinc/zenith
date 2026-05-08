@@ -97,9 +97,7 @@ impl ServerState {
         drop(g);
         let mut g = self.memtables.write();
         g.entry((tenant, partition))
-            .or_insert_with(|| {
-                MemTable::new(tenant, partition, self.config.ingest.flush_max_bytes)
-            })
+            .or_insert_with(|| MemTable::new(tenant, partition, self.config.ingest.flush_max_bytes))
             .clone()
     }
 }

@@ -9,20 +9,22 @@
 //! See `magic.rs`, `meta.rs`, `row_group.rs`, `page.rs`, `hotcache.rs`,
 //! `footer.rs`, `writer.rs`, `reader.rs` for details.
 
+pub mod footer;
+pub mod hotcache;
 pub mod magic;
 pub mod meta;
-pub mod row_group;
 pub mod page;
-pub mod hotcache;
-pub mod footer;
-pub mod writer;
 pub mod reader;
+pub mod row_group;
+pub mod writer;
 
-pub use magic::{MAGIC_HEADER, MAGIC_TRAILER, FORMAT_VERSION};
-pub use meta::SegmentMetadata;
-pub use row_group::{RowGroupBuilder, RowGroupReader, RowGroupHeader, ColumnPageDescriptor};
-pub use page::{ColumnValues, PageEncoding, PageView, RowValue, decode_one_row, decode_page, encode_page};
-pub use hotcache::{Hotcache, ColumnHotcacheEntry};
 pub use footer::Footer;
-pub use writer::SegmentWriter;
+pub use hotcache::{ColumnHotcacheEntry, Hotcache};
+pub use magic::{FORMAT_VERSION, MAGIC_HEADER, MAGIC_TRAILER};
+pub use meta::SegmentMetadata;
+pub use page::{
+    decode_one_row, decode_page, encode_page, ColumnValues, PageEncoding, PageView, RowValue,
+};
 pub use reader::SegmentReader;
+pub use row_group::{ColumnPageDescriptor, RowGroupBuilder, RowGroupHeader, RowGroupReader};
+pub use writer::SegmentWriter;

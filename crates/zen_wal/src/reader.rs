@@ -84,17 +84,16 @@ mod tests {
     #[tokio::test]
     async fn concurrent_writers_do_not_overwrite() {
         let store: Arc<dyn BlobStore> = Arc::new(InMemoryStore::default());
-        let schema = Arc::new(ArrowSchema::new(vec![Field::new("id", DataType::Int64, false)]));
-        let batch_a = RecordBatch::try_new(
-            schema.clone(),
-            vec![Arc::new(Int64Array::from(vec![1i64]))],
-        )
-        .unwrap();
-        let batch_b = RecordBatch::try_new(
-            schema,
-            vec![Arc::new(Int64Array::from(vec![2i64]))],
-        )
-        .unwrap();
+        let schema = Arc::new(ArrowSchema::new(vec![Field::new(
+            "id",
+            DataType::Int64,
+            false,
+        )]));
+        let batch_a =
+            RecordBatch::try_new(schema.clone(), vec![Arc::new(Int64Array::from(vec![1i64]))])
+                .unwrap();
+        let batch_b =
+            RecordBatch::try_new(schema, vec![Arc::new(Int64Array::from(vec![2i64]))]).unwrap();
 
         // Two writers with the same (tenant, partition, commit_id) but different ulids.
         // They should not collide because ulid is regenerated.

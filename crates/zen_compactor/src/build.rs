@@ -8,14 +8,12 @@
 use std::collections::HashMap;
 
 use ulid::Ulid;
-use zen_common::{
-    PartitionId, Schema, SpanRecord, TenantId, ZenError, ZenResult,
-};
+use zen_common::{PartitionId, Schema, SpanRecord, TenantId, ZenError, ZenResult};
+use zen_format::hotcache::RowGroupHotcacheEntry;
 use zen_format::{
     encode_page, ColumnHotcacheEntry, ColumnValues, Hotcache, PageEncoding, RowGroupBuilder,
     SegmentMetadata, SegmentWriter,
 };
-use zen_format::hotcache::RowGroupHotcacheEntry;
 use zen_index::{PostingMap, ZoneMap, ZoneMapValue};
 
 #[derive(Clone, Debug)]
@@ -142,9 +140,8 @@ pub fn build_segment_from_rows(
                 writer_memory_bytes: 15_000_000,
             };
             let accessor = SpanFieldAccessor { rows: chunk };
-            let res = zen_fts::build_fts_index(&accessor, &opts).map_err(|e| {
-                ZenError::compactor(format!("fts build: {e}"))
-            })?;
+            let res = zen_fts::build_fts_index(&accessor, &opts)
+                .map_err(|e| ZenError::compactor(format!("fts build: {e}")))?;
             let local_off = inline_indexes.len() as u64;
             let len = res.blob.len() as u32;
             inline_indexes.extend_from_slice(&res.blob);
@@ -163,10 +160,8 @@ pub fn build_segment_from_rows(
             .position(|c| c.name == "metadata")
             .map(|i| i as u32)
         {
-            let json_values: Vec<serde_json::Value> = chunk
-                .iter()
-                .filter_map(|r| r.metadata.clone())
-                .collect();
+            let json_values: Vec<&serde_json::Value> =
+                chunk.iter().filter_map(|r| r.metadata.as_ref()).collect();
             // Discover paths from the sample.
             let cfg = zen_jsonpath::DiscoveryConfig {
                 sample_size: 10_000,
@@ -174,7 +169,7 @@ pub fn build_segment_from_rows(
                 max_paths: 256,
                 max_depth: 6,
             };
-            let discovered = zen_jsonpath::discover_paths(json_values.iter(), &cfg);
+            let discovered = zen_jsonpath::discover_paths(json_values.iter().copied(), &cfg);
             let paths: Vec<String> = discovered.into_iter().map(|p| p.path).collect();
             if !paths.is_empty() {
                 let mut builder = zen_jsonpath::JsonPathIndexBuilder::new(paths);
@@ -709,17 +704,15 @@ fn finalize_one_row_group(
         .position(|c| c.name == "metadata")
         .map(|i| i as u32)
     {
-        let json_values: Vec<serde_json::Value> = chunk
-            .iter()
-            .filter_map(|r| r.metadata.clone())
-            .collect();
+        let json_values: Vec<&serde_json::Value> =
+            chunk.iter().filter_map(|r| r.metadata.as_ref()).collect();
         let cfg = zen_jsonpath::DiscoveryConfig {
             sample_size: 10_000,
             min_presence_pct: 1.0,
             max_paths: 256,
             max_depth: 6,
         };
-        let discovered = zen_jsonpath::discover_paths(json_values.iter(), &cfg);
+        let discovered = zen_jsonpath::discover_paths(json_values.iter().copied(), &cfg);
         let paths: Vec<String> = discovered.into_iter().map(|p| p.path).collect();
         if !paths.is_empty() {
             let mut builder = zen_jsonpath::JsonPathIndexBuilder::new(paths);

@@ -7,9 +7,7 @@ use serde::{Deserialize, Serialize};
 
 use zen_auth::Claims;
 use zen_catalog::model::WalObjectRow;
-use zen_common::{
-    CommitId, PartitionId, Schema, SpanId, SpanRecord, TenantId, TraceId,
-};
+use zen_common::{CommitId, PartitionId, Schema, SpanId, SpanRecord, TenantId, TraceId};
 use zen_wal::WalWriter;
 
 use crate::metrics::names;
@@ -117,12 +115,8 @@ async fn handle_ingest_inner(
     //
     // simd-json mutates its input buffer, so we own a Vec.
     let mut buf = body.to_vec();
-    let req: IngestRequest = simd_json::from_slice(&mut buf).map_err(|e| {
-        (
-            StatusCode::BAD_REQUEST,
-            format!("ingest body parse: {e}"),
-        )
-    })?;
+    let req: IngestRequest = simd_json::from_slice(&mut buf)
+        .map_err(|e| (StatusCode::BAD_REQUEST, format!("ingest body parse: {e}")))?;
     // CRITICAL: enforce JWT-tenant matches request tenant.
     if claims.sub != ANONYMOUS_SUB && claims.tenant_id != req.tenant_id {
         return Err((

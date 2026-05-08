@@ -10,8 +10,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::errors::{ZenError, ZenResult};
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
-#[derive(Default)]
+#[derive(Clone, Debug, Serialize, Deserialize, Default)]
 pub struct Config {
     #[serde(default)]
     pub server: ServerConfig,
@@ -303,7 +302,6 @@ impl Default for TelemetryConfig {
         }
     }
 }
-
 
 impl Config {
     /// Load from TOML on disk, applying env overrides on top.

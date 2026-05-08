@@ -116,7 +116,8 @@ pub async fn handle_otlp_traces(
             .and_then(|r| attr_str(&r.attributes, "service.name"));
         for ss in rs.scope_spans {
             for s in ss.spans {
-                if let Some(rec) = otlp_to_span(s, tenant, partition, resource_provider.as_deref()) {
+                if let Some(rec) = otlp_to_span(s, tenant, partition, resource_provider.as_deref())
+                {
                     records.push(rec);
                 }
             }

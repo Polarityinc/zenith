@@ -1,16 +1,16 @@
 //! Object-storage facade and NVMe page cache.
 
-pub mod store;
-pub mod local_fs;
 pub mod cache;
 pub mod coalesce;
-pub mod group_commit;
 pub mod encrypting;
+pub mod group_commit;
+pub mod local_fs;
+pub mod store;
 
-pub use store::{BlobStore, BlobError};
-pub use local_fs::LocalFsStore;
 pub use cache::PageCache;
 pub use coalesce::RequestCoalescer;
+pub use local_fs::LocalFsStore;
+pub use store::{BlobError, BlobStore};
 
 use std::sync::Arc;
 
@@ -69,8 +69,8 @@ fn load_root_key(path: &str) -> ZenResult<[u8; 32]> {
             "crypto.enabled=true requires crypto.root_key_path",
         ));
     }
-    let raw = std::fs::read(path)
-        .map_err(|e| ZenError::storage(format!("read root key {path}: {e}")))?;
+    let raw =
+        std::fs::read(path).map_err(|e| ZenError::storage(format!("read root key {path}: {e}")))?;
     if raw.len() == 32 {
         return <[u8; 32]>::try_from(raw.as_slice())
             .map_err(|_| ZenError::storage("internal: 32-byte slice didn't fit"));
