@@ -4,7 +4,7 @@ use std::sync::Arc;
 
 use tokio::net::TcpListener;
 
-use zen_catalog::{Catalog, SqliteCatalog};
+use zen_catalog::{Catalog, MockCatalog};
 use zen_common::{Config, PartitionId, TenantId};
 use zen_server::{http::router, ServerState};
 use zen_storage::{local_fs::InMemoryStore, BlobStore};
@@ -12,7 +12,7 @@ use zen_storage::{local_fs::InMemoryStore, BlobStore};
 #[tokio::test]
 async fn openapi_endpoint_returns_spec() {
     let store: Arc<dyn BlobStore> = Arc::new(InMemoryStore::default());
-    let cat: Arc<dyn Catalog> = Arc::new(SqliteCatalog::open_in_memory().await.unwrap());
+    let cat: Arc<dyn Catalog> = Arc::new(MockCatalog::new());
     cat.ensure_tenant(TenantId(1), "t").await.unwrap();
     cat.ensure_partition(TenantId(1), PartitionId(0))
         .await

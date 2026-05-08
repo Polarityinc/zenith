@@ -5,7 +5,7 @@ use std::sync::Arc;
 
 use tempfile::TempDir;
 
-use zen_catalog::{Catalog, SqliteCatalog};
+use zen_catalog::{Catalog, MockCatalog};
 use zen_common::{Config, PartitionId, TenantId};
 use zen_server::{http::serve, ServerState};
 use zen_storage::{local_fs::InMemoryStore, BlobStore};
@@ -24,7 +24,7 @@ async fn https_listener_serves_health() {
     std::fs::write(&key_path, KEY_PEM).unwrap();
 
     let store: Arc<dyn BlobStore> = Arc::new(InMemoryStore::default());
-    let cat: Arc<dyn Catalog> = Arc::new(SqliteCatalog::open_in_memory().await.unwrap());
+    let cat: Arc<dyn Catalog> = Arc::new(MockCatalog::new());
     cat.ensure_tenant(TenantId(1), "t").await.unwrap();
     cat.ensure_partition(TenantId(1), PartitionId(0))
         .await

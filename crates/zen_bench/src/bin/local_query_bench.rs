@@ -14,7 +14,7 @@ use std::time::{Duration, Instant};
 
 use bytes::Bytes;
 use chrono::Utc;
-use zen_catalog::{model::SegmentRow, Catalog, SqliteCatalog};
+use zen_catalog::{model::SegmentRow, Catalog, MockCatalog};
 use zen_common::{CommitId, PartitionId, Schema, SpanId, SpanRecord, TenantId, TraceId};
 use zen_compactor::{build_segment_from_rows, BuildOptions};
 use zen_query::{SegmentCache, SegmentListCache};
@@ -116,7 +116,7 @@ async fn build_corpus(args: &Args) -> anyhow::Result<BuiltCorpus> {
     let partition = PartitionId(0);
     let schema = Schema::spans_v1();
     let store: Arc<dyn BlobStore> = Arc::new(InMemoryStore::default());
-    let catalog: Arc<dyn Catalog> = Arc::new(SqliteCatalog::open_in_memory().await?);
+    let catalog: Arc<dyn Catalog> = Arc::new(Ok::<_,zen_common::ZenError>(MockCatalog::new())?);
     catalog.ensure_tenant(tenant, "bench").await?;
     catalog.ensure_partition(tenant, partition).await?;
 

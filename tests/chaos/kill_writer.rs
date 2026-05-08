@@ -7,7 +7,7 @@ use std::sync::Arc;
 use chrono::Utc;
 use uuid::Uuid;
 
-use zen_catalog::{model::WalObjectRow, Catalog, SqliteCatalog};
+use zen_catalog::{model::WalObjectRow, Catalog, MockCatalog};
 use zen_common::{
     CommitId, PartitionId, Schema, SchemaFingerprint, SpanId, SpanRecord, TenantId, TraceId,
 };
@@ -19,7 +19,7 @@ use zen_wal::WalWriter;
 #[tokio::test]
 async fn wal_durable_then_compact_recovers_rows() {
     let store: Arc<dyn BlobStore> = Arc::new(InMemoryStore::default());
-    let catalog: Arc<dyn Catalog> = Arc::new(SqliteCatalog::open_in_memory().await.unwrap());
+    let catalog: Arc<dyn Catalog> = Arc::new(MockCatalog::new());
     catalog.ensure_tenant(TenantId(1), "t").await.unwrap();
     catalog
         .ensure_partition(TenantId(1), PartitionId(0))

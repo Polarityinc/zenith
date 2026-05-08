@@ -87,8 +87,8 @@ async-trait = "0.1"
 # Storage
 object_store = { version = "0.11", features = ["aws", "gcp", "azure"] }
 
-# Catalog (sqlite default; postgres feature-gated by individual crates)
-sqlx = { version = "0.8", default-features = false, features = ["sqlite", "runtime-tokio", "macros", "migrate", "chrono"] }
+# Catalog (Postgres only; sqlite removed in favour of MockCatalog for tests)
+sqlx = { version = "0.8", default-features = false, features = ["postgres", "runtime-tokio", "tls-rustls-aws-lc-rs", "macros", "migrate", "chrono", "uuid"] }
 
 # Networking
 prost = "0.13"
