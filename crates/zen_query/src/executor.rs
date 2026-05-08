@@ -1,15 +1,22 @@
 //! Query executor.
 //!
 //! Implements the late-materialization scan loop:
-//!   1. Use catalog to pick relevant segments.
-//!   2. For each segment, prune row groups via metadata.
-//!   3. For each surviving row group:
-//!       a. Apply equality predicates against decoded "thin" columns.
-//!       b. Apply FTS predicate (if any) → row mask.
-//!       c. Apply JSON-path predicate (if any).
-//!       d. Late-materialize wide columns ONLY for surviving rows.
-//!   4. Merge with WAL/memtable scans.
-//!   5. Apply ORDER BY, LIMIT, GROUP BY, projection.
+//! 1. Use catalog to pick relevant segments.
+//! 2. For each segment, prune row groups via metadata.
+//! 3. For each surviving row group:
+//!    a. Apply equality predicates against decoded "thin" columns.
+//!    b. Apply FTS predicate (if any) → row mask.
+//!    c. Apply JSON-path predicate (if any).
+//!    d. Late-materialize wide columns ONLY for surviving rows.
+//! 4. Merge with WAL/memtable scans.
+//! 5. Apply ORDER BY, LIMIT, GROUP BY, projection.
+
+// Hot-path mask scans index a freshly-built `Vec<bool>` by integer
+// position; clippy suggests `iter().enumerate()` but that materializes
+// `&bool` references that the optimizer fights with. The current
+// indexed form generates the tightest scalar code on aarch64 — see
+// the durability_bench comparison. Keeping the suppression localized.
+#![allow(clippy::needless_range_loop)]
 
 use std::sync::Arc;
 use std::time::Instant;
@@ -573,7 +580,7 @@ async fn count_one_segment(
     seg_cache: &SegmentCache,
     plan: &LogicalPlan,
 ) -> ZenResult<(ahash::AHashMap<Vec<String>, i64>, ResultStats)> {
-    use zen_format::{ColumnValues, RowValue};
+    use zen_format::ColumnValues;
     let extras = seg_cache.get_or_load(&seg.object_key, store).await?;
     let reader = &extras.reader;
 
@@ -921,18 +928,15 @@ fn scan_text_match(
                     let end = start + len as usize;
                     if reader.bytes.len() >= end {
                         let blob = &reader.bytes[start..end];
-                        match zen_fts::open_fts_index(blob) {
-                            Ok(handle) => {
-                                let q = zen_fts::FtsQuery {
-                                    field: Some(column),
-                                    query,
-                                    limit: 100_000,
-                                };
-                                if let Ok(bm) = handle.search_to_bitmap(&q) {
-                                    return Ok(bm);
-                                }
+                        if let Ok(handle) = zen_fts::open_fts_index(blob) {
+                            let q = zen_fts::FtsQuery {
+                                field: Some(column),
+                                query,
+                                limit: 100_000,
+                            };
+                            if let Ok(bm) = handle.search_to_bitmap(&q) {
+                                return Ok(bm);
                             }
-                            Err(_) => {}
                         }
                     }
                 }
@@ -1016,6 +1020,12 @@ fn scan_jsonpath_eq(
 /// look up `value` and return the matching row mask. Returns `None` if no
 /// posting list exists or the value isn't present (returns empty bitmap if
 /// posting list is present but value is missing).
+///
+/// Currently unused — the inline scan path is fast enough that the posting
+/// lookup hasn't earned its keep on the workloads measured so far. Kept
+/// for the future "low-cardinality-equality" optimizer path; remove if
+/// the v1 design ships without it.
+#[allow(dead_code)]
 fn posting_lookup(
     reader: &SegmentReader,
     rg_idx: usize,
@@ -1164,7 +1174,7 @@ fn run_group_aggregate(rows: &[ResultRow], plan: &LogicalPlan) -> Vec<ResultRow>
             .map(|c| {
                 row.fields
                     .get(c)
-                    .map(|v| value_to_string(v))
+                    .map(value_to_string)
                     .unwrap_or_default()
             })
             .collect();
@@ -1265,170 +1275,6 @@ fn value_to_string(v: &serde_json::Value) -> String {
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use std::sync::Arc;
-
-    use chrono::Utc;
-    use ulid::Ulid;
-    use uuid::Uuid;
-
-    use zen_catalog::{model::WalObjectRow, Catalog, SqliteCatalog};
-    use zen_common::{CommitId, Schema, SchemaFingerprint, SpanId, SpanRecord, TraceId};
-    use zen_compactor::compact_partition;
-    use zen_memtable::flush_to_record_batch;
-    use zen_storage::local_fs::InMemoryStore;
-    use zen_wal::WalWriter;
-
-    use crate::expr::{Expr, Literal};
-    use crate::logical::{LogicalPlan, Predicate, Projection};
-
-    async fn setup_indexed_segment() -> (Arc<dyn Catalog>, Arc<dyn BlobStore>) {
-        let store: Arc<dyn BlobStore> = Arc::new(InMemoryStore::default());
-        let catalog: Arc<dyn Catalog> = Arc::new(SqliteCatalog::open_in_memory().await.unwrap());
-        catalog.ensure_tenant(TenantId(1), "t").await.unwrap();
-        catalog.ensure_partition(TenantId(1), PartitionId(0)).await.unwrap();
-
-        let mut rows = Vec::new();
-        for t in 0..5u32 {
-            let mut tid = [0u8; 16];
-            tid[0..4].copy_from_slice(&t.to_be_bytes());
-            for s in 0..10u32 {
-                let mut sid = [0u8; 16];
-                sid[0..4].copy_from_slice(&t.to_be_bytes());
-                sid[4..8].copy_from_slice(&s.to_be_bytes());
-                let mut r = SpanRecord::new(TenantId(1), PartitionId(0));
-                r.trace_id = TraceId(tid);
-                r.span_id = SpanId(sid);
-                r.start_time_ms = 1000 + (t as i64) * 100 + s as i64;
-                r.duration_ms = 50;
-                r.model = Some(if s % 2 == 0 { "gpt-4o" } else { "haiku" }.into());
-                r.status = Some(if s == 9 { "error" } else { "ok" }.into());
-                r.prompt = Some(format!(
-                    "trace {t} span {s}: {}",
-                    if s == 7 { "out of memory" } else { "no error" }
-                ));
-                r.completion = Some(format!("response {s}"));
-                r.commit_id = CommitId((t * 10 + s + 1) as u64);
-                rows.push(r);
-            }
-        }
-        let writer = WalWriter::new(store.clone());
-        let batch = flush_to_record_batch(&rows).unwrap();
-        let key = writer
-            .flush(
-                TenantId(1),
-                PartitionId(0),
-                CommitId(1),
-                Schema::spans_v1().fingerprint(),
-                &batch,
-            )
-            .await
-            .unwrap();
-        catalog
-            .register_wal_object(WalObjectRow {
-                wal_id: Uuid::from_u128(Ulid::new().0),
-                tenant_id: TenantId(1),
-                partition_id: PartitionId(0),
-                object_key: key.to_string(),
-                commit_id_min: CommitId(1),
-                commit_id_max: CommitId(1),
-                byte_count: 0,
-                row_count: rows.len() as i64,
-                schema_fingerprint: SchemaFingerprint(0),
-                consumed_at: None,
-                created_at: Utc::now(),
-            })
-            .await
-            .unwrap();
-
-        let _ = compact_partition(
-            catalog.clone(),
-            store.clone(),
-            TenantId(1),
-            PartitionId(0),
-            "w",
-            &Schema::spans_v1(),
-        )
-        .await
-        .unwrap();
-        (catalog, store)
-    }
-
-    #[tokio::test]
-    async fn time_range_attr_filter_returns_correct_rows() {
-        let (catalog, store) = setup_indexed_segment().await;
-        let plan = LogicalPlan {
-            tenant_id: 1,
-            partition_ids: vec![0],
-            projection: Projection::list(["span_id".into(), "model".into(), "status".into()]),
-            predicate: Some(Predicate {
-                expr: Expr::and(
-                    Expr::eq(Expr::col("status"), Expr::lit_str("error")),
-                    Expr::eq(Expr::col("model"), Expr::lit_str("haiku")),
-                ),
-            }),
-            time_min_ms: 0,
-            time_max_ms: i64::MAX,
-            ..Default::default()
-        };
-        let rs = execute(&plan, catalog, store).await.unwrap();
-        // s=9 is error and odd → haiku → 5 hits (one per trace).
-        assert_eq!(rs.rows.len(), 5);
-        for row in &rs.rows {
-            assert_eq!(row.fields.get("status").unwrap(), "error");
-            assert_eq!(row.fields.get("model").unwrap(), "haiku");
-        }
-    }
-
-    #[tokio::test]
-    async fn fts_text_match() {
-        let (catalog, store) = setup_indexed_segment().await;
-        let plan = LogicalPlan {
-            tenant_id: 1,
-            partition_ids: vec![0],
-            projection: Projection::list(["span_id".into(), "prompt".into()]),
-            predicate: Some(Predicate {
-                expr: Expr::TextMatch {
-                    column: "prompt".into(),
-                    query: "out of memory".into(),
-                },
-            }),
-            time_min_ms: 0,
-            time_max_ms: i64::MAX,
-            ..Default::default()
-        };
-        let rs = execute(&plan, catalog, store).await.unwrap();
-        // s=7 has "out of memory" → 5 traces × 1 span = 5.
-        assert_eq!(rs.rows.len(), 5);
-    }
-
-    #[tokio::test]
-    async fn aggregation_count_by_model() {
-        let (catalog, store) = setup_indexed_segment().await;
-        let plan = LogicalPlan {
-            tenant_id: 1,
-            partition_ids: vec![0],
-            projection: Projection::star(),
-            predicate: None,
-            time_min_ms: 0,
-            time_max_ms: i64::MAX,
-            group_by: vec!["model".into()],
-            aggregates: vec![("count".into(), AggregateFn::Count)],
-            ..Default::default()
-        };
-        let rs = execute(&plan, catalog, store).await.unwrap();
-        assert_eq!(rs.rows.len(), 2);
-        let total: i64 = rs
-            .rows
-            .iter()
-            .filter_map(|r| r.fields.get("count").and_then(|v| v.as_i64()))
-            .sum();
-        assert_eq!(total, 50);
-    }
-}
-
 /// Scan all WAL objects that haven't been consumed by a compaction yet, apply
 /// the predicate, and return matching rows. This is the "writes are visible
 /// on PUT-ack" path — without it, queries only see rows that have made it into
@@ -1441,7 +1287,7 @@ async fn scan_unconsumed_wals(
     plan: &LogicalPlan,
     trace_id_filter: Option<[u8; 16]>,
 ) -> ZenResult<Vec<ResultRow>> {
-    use zen_common::{CommitId, SpanRecord};
+    use zen_common::CommitId;
     use zen_wal::WalReader;
 
     let wals = catalog
@@ -1668,10 +1514,8 @@ fn apply_pred_vectorized(
                 if let Some(a) = arr.as_any().downcast_ref::<StringArray>() {
                     let needle = v.as_str();
                     for r in 0..n {
-                        if mask[r] {
-                            if a.is_null(r) || a.value(r) != needle {
-                                mask[r] = false;
-                            }
+                        if mask[r] && (a.is_null(r) || a.value(r) != needle) {
+                            mask[r] = false;
                         }
                     }
                     return Ok(());
@@ -1680,10 +1524,8 @@ fn apply_pred_vectorized(
                     if let Ok(u) = ulid::Ulid::from_string(v) {
                         let target = u.0.to_be_bytes();
                         for r in 0..n {
-                            if mask[r] {
-                                if a.is_null(r) || a.value(r) != &target[..] {
-                                    mask[r] = false;
-                                }
+                            if mask[r] && (a.is_null(r) || a.value(r) != &target[..]) {
+                                mask[r] = false;
                             }
                         }
                         return Ok(());
@@ -1707,10 +1549,8 @@ fn apply_pred_vectorized(
                 let arr = batch.column(i);
                 if let Some(a) = arr.as_any().downcast_ref::<Int64Array>() {
                     for r in 0..n {
-                        if mask[r] {
-                            if a.is_null(r) || a.value(r) != *v {
-                                mask[r] = false;
-                            }
+                        if mask[r] && (a.is_null(r) || a.value(r) != *v) {
+                            mask[r] = false;
                         }
                     }
                 }
@@ -1732,10 +1572,8 @@ fn apply_pred_vectorized(
             if let Some(a) = arr.as_any().downcast_ref::<StringArray>() {
                 let needle = query.to_lowercase();
                 for r in 0..n {
-                    if mask[r] {
-                        if a.is_null(r) || !a.value(r).to_lowercase().contains(&needle) {
-                            mask[r] = false;
-                        }
+                    if mask[r] && (a.is_null(r) || !a.value(r).to_lowercase().contains(&needle)) {
+                        mask[r] = false;
                     }
                 }
             }
@@ -1745,6 +1583,7 @@ fn apply_pred_vectorized(
     }
 }
 
+#[allow(dead_code)]
 fn arrow_row_matches(
     batch: &arrow_array::RecordBatch,
     schema: &arrow_schema::Schema,
@@ -1812,5 +1651,169 @@ fn arrow_row_matches(
             Ok(false)
         }
         _ => Ok(true), // unsupported predicate types over WAL: conservative pass.
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::Arc;
+
+    use chrono::Utc;
+    use ulid::Ulid;
+    use uuid::Uuid;
+
+    use zen_catalog::{model::WalObjectRow, Catalog, SqliteCatalog};
+    use zen_common::{CommitId, Schema, SchemaFingerprint, SpanId, SpanRecord, TraceId};
+    use zen_compactor::compact_partition;
+    use zen_memtable::flush_to_record_batch;
+    use zen_storage::local_fs::InMemoryStore;
+    use zen_wal::WalWriter;
+
+    use crate::expr::Expr;
+    use crate::logical::{LogicalPlan, Predicate, Projection};
+
+    async fn setup_indexed_segment() -> (Arc<dyn Catalog>, Arc<dyn BlobStore>) {
+        let store: Arc<dyn BlobStore> = Arc::new(InMemoryStore::default());
+        let catalog: Arc<dyn Catalog> = Arc::new(SqliteCatalog::open_in_memory().await.unwrap());
+        catalog.ensure_tenant(TenantId(1), "t").await.unwrap();
+        catalog.ensure_partition(TenantId(1), PartitionId(0)).await.unwrap();
+
+        let mut rows = Vec::new();
+        for t in 0..5u32 {
+            let mut tid = [0u8; 16];
+            tid[0..4].copy_from_slice(&t.to_be_bytes());
+            for s in 0..10u32 {
+                let mut sid = [0u8; 16];
+                sid[0..4].copy_from_slice(&t.to_be_bytes());
+                sid[4..8].copy_from_slice(&s.to_be_bytes());
+                let mut r = SpanRecord::new(TenantId(1), PartitionId(0));
+                r.trace_id = TraceId(tid);
+                r.span_id = SpanId(sid);
+                r.start_time_ms = 1000 + (t as i64) * 100 + s as i64;
+                r.duration_ms = 50;
+                r.model = Some(if s % 2 == 0 { "gpt-4o" } else { "haiku" }.into());
+                r.status = Some(if s == 9 { "error" } else { "ok" }.into());
+                r.prompt = Some(format!(
+                    "trace {t} span {s}: {}",
+                    if s == 7 { "out of memory" } else { "no error" }
+                ));
+                r.completion = Some(format!("response {s}"));
+                r.commit_id = CommitId((t * 10 + s + 1) as u64);
+                rows.push(r);
+            }
+        }
+        let writer = WalWriter::new(store.clone());
+        let batch = flush_to_record_batch(&rows).unwrap();
+        let key = writer
+            .flush(
+                TenantId(1),
+                PartitionId(0),
+                CommitId(1),
+                Schema::spans_v1().fingerprint(),
+                &batch,
+            )
+            .await
+            .unwrap();
+        catalog
+            .register_wal_object(WalObjectRow {
+                wal_id: Uuid::from_u128(Ulid::new().0),
+                tenant_id: TenantId(1),
+                partition_id: PartitionId(0),
+                object_key: key.to_string(),
+                commit_id_min: CommitId(1),
+                commit_id_max: CommitId(1),
+                byte_count: 0,
+                row_count: rows.len() as i64,
+                schema_fingerprint: SchemaFingerprint(0),
+                consumed_at: None,
+                created_at: Utc::now(),
+            })
+            .await
+            .unwrap();
+
+        let _ = compact_partition(
+            catalog.clone(),
+            store.clone(),
+            TenantId(1),
+            PartitionId(0),
+            "w",
+            &Schema::spans_v1(),
+        )
+        .await
+        .unwrap();
+        (catalog, store)
+    }
+
+    #[tokio::test]
+    async fn time_range_attr_filter_returns_correct_rows() {
+        let (catalog, store) = setup_indexed_segment().await;
+        let plan = LogicalPlan {
+            tenant_id: 1,
+            partition_ids: vec![0],
+            projection: Projection::list(["span_id".into(), "model".into(), "status".into()]),
+            predicate: Some(Predicate {
+                expr: Expr::and(
+                    Expr::eq(Expr::col("status"), Expr::lit_str("error")),
+                    Expr::eq(Expr::col("model"), Expr::lit_str("haiku")),
+                ),
+            }),
+            time_min_ms: 0,
+            time_max_ms: i64::MAX,
+            ..Default::default()
+        };
+        let rs = execute(&plan, catalog, store).await.unwrap();
+        // s=9 is error and odd → haiku → 5 hits (one per trace).
+        assert_eq!(rs.rows.len(), 5);
+        for row in &rs.rows {
+            assert_eq!(row.fields.get("status").unwrap(), "error");
+            assert_eq!(row.fields.get("model").unwrap(), "haiku");
+        }
+    }
+
+    #[tokio::test]
+    async fn fts_text_match() {
+        let (catalog, store) = setup_indexed_segment().await;
+        let plan = LogicalPlan {
+            tenant_id: 1,
+            partition_ids: vec![0],
+            projection: Projection::list(["span_id".into(), "prompt".into()]),
+            predicate: Some(Predicate {
+                expr: Expr::TextMatch {
+                    column: "prompt".into(),
+                    query: "out of memory".into(),
+                },
+            }),
+            time_min_ms: 0,
+            time_max_ms: i64::MAX,
+            ..Default::default()
+        };
+        let rs = execute(&plan, catalog, store).await.unwrap();
+        // s=7 has "out of memory" → 5 traces × 1 span = 5.
+        assert_eq!(rs.rows.len(), 5);
+    }
+
+    #[tokio::test]
+    async fn aggregation_count_by_model() {
+        let (catalog, store) = setup_indexed_segment().await;
+        let plan = LogicalPlan {
+            tenant_id: 1,
+            partition_ids: vec![0],
+            projection: Projection::star(),
+            predicate: None,
+            time_min_ms: 0,
+            time_max_ms: i64::MAX,
+            group_by: vec!["model".into()],
+            aggregates: vec![("count".into(), AggregateFn::Count)],
+            ..Default::default()
+        };
+        let rs = execute(&plan, catalog, store).await.unwrap();
+        assert_eq!(rs.rows.len(), 2);
+        let total: i64 = rs
+            .rows
+            .iter()
+            .filter_map(|r| r.fields.get("count").and_then(|v| v.as_i64()))
+            .sum();
+        assert_eq!(total, 50);
     }
 }

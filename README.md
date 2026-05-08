@@ -59,6 +59,25 @@ cargo run --release -p zen_cli -- bench compare \
     --update-leaderboard
 ```
 
+## Production readiness
+
+Zenith ships with the operational primitives needed to run on real
+infrastructure. See [`docs/RUNBOOK.md`](docs/RUNBOOK.md) for the
+operator's guide and [`CHANGELOG.md`](CHANGELOG.md) for what landed
+when.
+
+- **Auth**: JWT (RS256 + JWKS) on customer routes, HMAC on inter-node.
+- **TLS**: optional `rustls` + `aws-lc-rs` termination, or run behind a
+  TLS-terminating LB.
+- **Observability**: `/v1/metrics` Prometheus endpoint + OTLP tracing.
+- **Reliability**: WAL fsync ON by default, graceful shutdown,
+  PodDisruptionBudget, multi-AZ catalog, snapshot/restore CLI.
+- **Encryption at rest**: `zen_crypto` envelope encryption; pluggable
+  KMS root key.
+- **Rate limits**: per-tenant token bucket + global concurrency cap.
+- **Multi-node**: rendezvous-hash sharded, transparent query routing,
+  3-node integration test in CI.
+
 ## Architecture
 
 ```

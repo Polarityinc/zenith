@@ -4,7 +4,6 @@ use std::io::Cursor;
 
 use arrow_array::RecordBatch;
 use arrow_ipc::reader::StreamReader;
-use bytes::Bytes;
 
 use zen_common::{ZenError, ZenResult};
 

@@ -10,7 +10,7 @@ use arrow_array::{
 };
 
 use zen_common::{
-    CommitId, PartitionId, SpanId, SpanRecord, TenantId, TraceId, ZenError, ZenResult,
+    CommitId, PartitionId, SpanId, SpanRecord, TenantId, TraceId, ZenResult,
 };
 use zen_storage::BlobStore;
 use zen_wal::WalReader;

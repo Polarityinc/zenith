@@ -21,7 +21,6 @@ use serde_json::Value;
 
 use zen_catalog::model::WalObjectRow;
 use zen_common::{CommitId, PartitionId, Schema, SpanId, SpanRecord, TenantId, TraceId};
-use zen_memtable::flush_to_record_batch;
 use zen_wal::WalWriter;
 
 use crate::state::ServerState;

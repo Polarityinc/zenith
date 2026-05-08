@@ -1,13 +1,12 @@
 //! Open a serialized Tantivy index blob and run queries against it.
 
-use std::path::Path;
 
-use bytes::{Buf, Bytes};
+use bytes::Buf;
 use roaring::RoaringBitmap;
 use serde::{Deserialize, Serialize};
 use tantivy::collector::TopDocs;
 use tantivy::query::{Query, QueryParser};
-use tantivy::schema::{Field, Schema as TSchema};
+use tantivy::schema::Field;
 use tantivy::{Index, IndexReader, ReloadPolicy};
 use tempfile::TempDir;
 

@@ -85,10 +85,8 @@ pub async fn run_suite(
                     local
                 }));
             }
-            for r in join_all(handles).await {
-                if let Ok(v) = r {
-                    samples.extend(v);
-                }
+            for v in join_all(handles).await.into_iter().flatten() {
+                samples.extend(v);
             }
         }
         td = td.merge_unsorted(samples.clone());

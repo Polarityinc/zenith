@@ -1,0 +1,17 @@
+[package]
+name = "zen_crypto"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+zen_common = { workspace = true }
+aes-gcm = { workspace = true }
+rand_core = { workspace = true }
+thiserror = { workspace = true }
+zeroize = { version = "1.7", features = ["zeroize_derive"] }
+serde = { workspace = true }
+
+[dev-dependencies]
+hex = "0.4"

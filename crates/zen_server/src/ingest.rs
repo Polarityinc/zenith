@@ -1,5 +1,7 @@
 //! Ingest endpoint.
 
+use std::time::Instant;
+
 use axum::{extract::State, http::StatusCode, Json};
 use serde::{Deserialize, Serialize};
 
@@ -7,9 +9,9 @@ use zen_catalog::model::WalObjectRow;
 use zen_common::{
     CommitId, PartitionId, Schema, SpanId, SpanRecord, TenantId, TraceId,
 };
-use zen_memtable::flush_to_record_batch;
 use zen_wal::WalWriter;
 
+use crate::metrics::names;
 use crate::state::ServerState;
 
 #[derive(Clone, Debug, Deserialize)]
@@ -78,6 +80,25 @@ pub struct IngestResponse {
 
 pub async fn handle_ingest(
     State(state): State<ServerState>,
+    body: axum::body::Bytes,
+) -> Result<Json<IngestResponse>, (StatusCode, String)> {
+    let started = Instant::now();
+    let result = handle_ingest_inner(state, body).await;
+    let elapsed = started.elapsed().as_secs_f64();
+    let (status, rows, tenant_label) = match &result {
+        Ok(r) => ("ok", r.spans_accepted as u64, String::new()),
+        Err(_) => ("error", 0, String::new()),
+    };
+    metrics::histogram!(names::INGEST_DURATION, "tenant" => tenant_label.clone()).record(elapsed);
+    if rows > 0 {
+        metrics::counter!(names::INGEST_ROWS_TOTAL, "tenant" => tenant_label.clone(), "status" => status)
+            .increment(rows);
+    }
+    result
+}
+
+async fn handle_ingest_inner(
+    state: ServerState,
     body: axum::body::Bytes,
 ) -> Result<Json<IngestResponse>, (StatusCode, String)> {
     // simd-json is 3-4× faster than serde_json for large bodies. The ingest

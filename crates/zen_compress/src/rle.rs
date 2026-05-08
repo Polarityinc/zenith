@@ -52,7 +52,7 @@ pub fn rle_decompress(input: &[u8]) -> Result<Vec<i64>, ZenError> {
         }
         let value = p.get_i64_le();
         let run = p.get_u32_le() as usize;
-        out.extend(std::iter::repeat(value).take(run));
+        out.extend(std::iter::repeat_n(value, run));
     }
     if out.len() != count {
         return Err(ZenError::compress(format!(

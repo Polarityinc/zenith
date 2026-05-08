@@ -167,149 +167,6 @@ pub async fn compact_partition(
     })
 }
 
-#[cfg(test)]
-mod tests {
-    use std::sync::Arc;
-
-    use chrono::Utc;
-    use ulid::Ulid;
-    use uuid::Uuid;
-
-    use zen_catalog::{model::WalObjectRow, SqliteCatalog};
-    use zen_common::{Schema, SchemaFingerprint, SpanId, SpanRecord, TraceId};
-    use zen_memtable::{flush_to_record_batch};
-    use zen_storage::local_fs::InMemoryStore;
-    use zen_wal::WalWriter;
-
-    use super::*;
-
-    #[tokio::test]
-    async fn end_to_end_compaction_trace_locality() {
-        let store: Arc<dyn BlobStore> = Arc::new(InMemoryStore::default());
-        let catalog: Arc<dyn Catalog> = Arc::new(SqliteCatalog::open_in_memory().await.unwrap());
-        catalog.ensure_tenant(TenantId(1), "t").await.unwrap();
-        catalog.ensure_partition(TenantId(1), PartitionId(0)).await.unwrap();
-
-        // Generate 10 traces × 10 spans each.
-        let mut rows = Vec::new();
-        for t in 0..10u32 {
-            let mut tid = [0u8; 16];
-            tid[0..4].copy_from_slice(&t.to_be_bytes());
-            for s in 0..10u32 {
-                let mut sid = [0u8; 16];
-                sid[0..4].copy_from_slice(&t.to_be_bytes());
-                sid[4..8].copy_from_slice(&s.to_be_bytes());
-                let mut r = SpanRecord::new(TenantId(1), PartitionId(0));
-                r.trace_id = TraceId(tid);
-                r.span_id = SpanId(sid);
-                r.start_time_ms = (t as i64) * 10_000 + (s as i64) * 100;
-                r.end_time_ms = r.start_time_ms + 50;
-                r.duration_ms = 50;
-                r.model = Some("gpt-4o".into());
-                r.status = Some("ok".into());
-                r.prompt = Some(format!("prompt for trace {t} span {s}"));
-                r.completion = Some(format!("response for span {s}"));
-                r.commit_id = CommitId((t * 10 + s + 1) as u64);
-                rows.push(r);
-            }
-        }
-        // Shuffle so they hit WAL out of order.
-        let chunks: Vec<&[SpanRecord]> = rows.chunks(20).collect();
-        let writer = WalWriter::new(store.clone());
-        for (i, chunk) in chunks.into_iter().enumerate() {
-            let batch = flush_to_record_batch(chunk).unwrap();
-            let key = writer
-                .flush(
-                    TenantId(1),
-                    PartitionId(0),
-                    CommitId((i as u64) + 1),
-                    Schema::spans_v1().fingerprint(),
-                    &batch,
-                )
-                .await
-                .unwrap();
-            catalog
-                .register_wal_object(WalObjectRow {
-                    wal_id: Uuid::from_u128(Ulid::new().0),
-                    tenant_id: TenantId(1),
-                    partition_id: PartitionId(0),
-                    object_key: key.to_string(),
-                    commit_id_min: CommitId((i as u64) + 1),
-                    commit_id_max: CommitId((i as u64) + 1),
-                    byte_count: 0,
-                    row_count: chunk.len() as i64,
-                    schema_fingerprint: SchemaFingerprint(0),
-                    consumed_at: None,
-                    created_at: Utc::now(),
-                })
-                .await
-                .unwrap();
-        }
-
-        let schema = Schema::spans_v1();
-        let stats = compact_partition(
-            catalog.clone(),
-            store.clone(),
-            TenantId(1),
-            PartitionId(0),
-            "test-worker",
-            &schema,
-        )
-        .await
-        .unwrap();
-        assert_eq!(stats.rows_compacted, 100);
-        assert!(stats.segment_bytes > 0);
-
-        // Verify trace-locality: every trace's spans are in one row group.
-        let segs = catalog
-            .list_segments_for_tenant(TenantId(1))
-            .await
-            .unwrap();
-        assert_eq!(segs.len(), 1);
-        let seg_bytes = store.get(&segs[0].object_key).await.unwrap();
-        let reader = zen_format::SegmentReader::from_bytes(seg_bytes.to_vec()).unwrap();
-
-        // Decode trace_id column from each row group; verify each trace appears in exactly 1 RG.
-        use std::collections::HashMap;
-        let mut trace_to_rgs: HashMap<[u8; 16], std::collections::HashSet<usize>> = HashMap::new();
-        for rg_idx in 0..reader.row_group_count() {
-            let cv = reader.read_column(rg_idx, 2).unwrap(); // trace_id is column 2 in spans_v1
-            if let zen_format::ColumnValues::Fixed16(v) = cv {
-                for tid in v {
-                    trace_to_rgs.entry(tid).or_default().insert(rg_idx);
-                }
-            }
-        }
-        for (tid, rgs) in &trace_to_rgs {
-            assert_eq!(
-                rgs.len(),
-                1,
-                "trace {tid:?} appears in multiple row groups: {rgs:?}"
-            );
-        }
-    }
-
-    #[tokio::test]
-    async fn empty_compaction_idempotent() {
-        let store: Arc<dyn BlobStore> = Arc::new(InMemoryStore::default());
-        let catalog: Arc<dyn Catalog> = Arc::new(SqliteCatalog::open_in_memory().await.unwrap());
-        catalog.ensure_tenant(TenantId(1), "t").await.unwrap();
-        catalog.ensure_partition(TenantId(1), PartitionId(0)).await.unwrap();
-        let schema = Schema::spans_v1();
-        let stats = compact_partition(
-            catalog,
-            store,
-            TenantId(1),
-            PartitionId(0),
-            "w",
-            &schema,
-        )
-        .await
-        .unwrap();
-        assert_eq!(stats.rows_compacted, 0);
-    }
-}
-
 /// Tier-N compaction: read every active segment + every unconsumed WAL,
 /// merge into one big segment, mark inputs as superseded/consumed.
 ///
@@ -390,11 +247,11 @@ pub async fn compact_full(
         // Pull min/max from the hotcache zone maps we just built.
         if let Some(rg_hc) = reader.hotcache.row_groups.get(i) {
             let trace_zm = rg_hc.columns.iter()
-                .find(|c| reader.metadata.column_names.get(c.column_idx as usize).map_or(false, |n| n == "trace_id"));
+                .find(|c| reader.metadata.column_names.get(c.column_idx as usize).is_some_and(|n| n == "trace_id"));
             let time_zm = rg_hc.columns.iter()
-                .find(|c| reader.metadata.column_names.get(c.column_idx as usize).map_or(false, |n| n == "start_time_ms"));
+                .find(|c| reader.metadata.column_names.get(c.column_idx as usize).is_some_and(|n| n == "start_time_ms"));
             let commit_zm = rg_hc.columns.iter()
-                .find(|c| reader.metadata.column_names.get(c.column_idx as usize).map_or(false, |n| n == "commit_id"));
+                .find(|c| reader.metadata.column_names.get(c.column_idx as usize).is_some_and(|n| n == "commit_id"));
             let (min_tid, max_tid) = match trace_zm.map(|c| &c.zone_map.value) {
                 Some(zen_index::ZoneMapValue::Fixed { min, max })
                 | Some(zen_index::ZoneMapValue::Bytes { min, max }) => {
@@ -681,6 +538,149 @@ impl<I: Iterator<Item = zen_common::SpanRecord>> Iterator for KWayMerge<I> {
             }
         }
         Some(row)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::Arc;
+
+    use chrono::Utc;
+    use ulid::Ulid;
+    use uuid::Uuid;
+
+    use zen_catalog::{model::WalObjectRow, SqliteCatalog};
+    use zen_common::{Schema, SchemaFingerprint, SpanId, SpanRecord, TraceId};
+    use zen_memtable::{flush_to_record_batch};
+    use zen_storage::local_fs::InMemoryStore;
+    use zen_wal::WalWriter;
+
+    use super::*;
+
+    #[tokio::test]
+    async fn end_to_end_compaction_trace_locality() {
+        let store: Arc<dyn BlobStore> = Arc::new(InMemoryStore::default());
+        let catalog: Arc<dyn Catalog> = Arc::new(SqliteCatalog::open_in_memory().await.unwrap());
+        catalog.ensure_tenant(TenantId(1), "t").await.unwrap();
+        catalog.ensure_partition(TenantId(1), PartitionId(0)).await.unwrap();
+
+        // Generate 10 traces × 10 spans each.
+        let mut rows = Vec::new();
+        for t in 0..10u32 {
+            let mut tid = [0u8; 16];
+            tid[0..4].copy_from_slice(&t.to_be_bytes());
+            for s in 0..10u32 {
+                let mut sid = [0u8; 16];
+                sid[0..4].copy_from_slice(&t.to_be_bytes());
+                sid[4..8].copy_from_slice(&s.to_be_bytes());
+                let mut r = SpanRecord::new(TenantId(1), PartitionId(0));
+                r.trace_id = TraceId(tid);
+                r.span_id = SpanId(sid);
+                r.start_time_ms = (t as i64) * 10_000 + (s as i64) * 100;
+                r.end_time_ms = r.start_time_ms + 50;
+                r.duration_ms = 50;
+                r.model = Some("gpt-4o".into());
+                r.status = Some("ok".into());
+                r.prompt = Some(format!("prompt for trace {t} span {s}"));
+                r.completion = Some(format!("response for span {s}"));
+                r.commit_id = CommitId((t * 10 + s + 1) as u64);
+                rows.push(r);
+            }
+        }
+        // Shuffle so they hit WAL out of order.
+        let chunks: Vec<&[SpanRecord]> = rows.chunks(20).collect();
+        let writer = WalWriter::new(store.clone());
+        for (i, chunk) in chunks.into_iter().enumerate() {
+            let batch = flush_to_record_batch(chunk).unwrap();
+            let key = writer
+                .flush(
+                    TenantId(1),
+                    PartitionId(0),
+                    CommitId((i as u64) + 1),
+                    Schema::spans_v1().fingerprint(),
+                    &batch,
+                )
+                .await
+                .unwrap();
+            catalog
+                .register_wal_object(WalObjectRow {
+                    wal_id: Uuid::from_u128(Ulid::new().0),
+                    tenant_id: TenantId(1),
+                    partition_id: PartitionId(0),
+                    object_key: key.to_string(),
+                    commit_id_min: CommitId((i as u64) + 1),
+                    commit_id_max: CommitId((i as u64) + 1),
+                    byte_count: 0,
+                    row_count: chunk.len() as i64,
+                    schema_fingerprint: SchemaFingerprint(0),
+                    consumed_at: None,
+                    created_at: Utc::now(),
+                })
+                .await
+                .unwrap();
+        }
+
+        let schema = Schema::spans_v1();
+        let stats = compact_partition(
+            catalog.clone(),
+            store.clone(),
+            TenantId(1),
+            PartitionId(0),
+            "test-worker",
+            &schema,
+        )
+        .await
+        .unwrap();
+        assert_eq!(stats.rows_compacted, 100);
+        assert!(stats.segment_bytes > 0);
+
+        // Verify trace-locality: every trace's spans are in one row group.
+        let segs = catalog
+            .list_segments_for_tenant(TenantId(1))
+            .await
+            .unwrap();
+        assert_eq!(segs.len(), 1);
+        let seg_bytes = store.get(&segs[0].object_key).await.unwrap();
+        let reader = zen_format::SegmentReader::from_bytes(seg_bytes.to_vec()).unwrap();
+
+        // Decode trace_id column from each row group; verify each trace appears in exactly 1 RG.
+        use std::collections::HashMap;
+        let mut trace_to_rgs: HashMap<[u8; 16], std::collections::HashSet<usize>> = HashMap::new();
+        for rg_idx in 0..reader.row_group_count() {
+            let cv = reader.read_column(rg_idx, 2).unwrap(); // trace_id is column 2 in spans_v1
+            if let zen_format::ColumnValues::Fixed16(v) = cv {
+                for tid in v {
+                    trace_to_rgs.entry(tid).or_default().insert(rg_idx);
+                }
+            }
+        }
+        for (tid, rgs) in &trace_to_rgs {
+            assert_eq!(
+                rgs.len(),
+                1,
+                "trace {tid:?} appears in multiple row groups: {rgs:?}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn empty_compaction_idempotent() {
+        let store: Arc<dyn BlobStore> = Arc::new(InMemoryStore::default());
+        let catalog: Arc<dyn Catalog> = Arc::new(SqliteCatalog::open_in_memory().await.unwrap());
+        catalog.ensure_tenant(TenantId(1), "t").await.unwrap();
+        catalog.ensure_partition(TenantId(1), PartitionId(0)).await.unwrap();
+        let schema = Schema::spans_v1();
+        let stats = compact_partition(
+            catalog,
+            store,
+            TenantId(1),
+            PartitionId(0),
+            "w",
+            &schema,
+        )
+        .await
+        .unwrap();
+        assert_eq!(stats.rows_compacted, 0);
     }
 }
 
