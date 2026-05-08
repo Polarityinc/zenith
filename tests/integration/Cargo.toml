@@ -21,6 +21,7 @@ zen_auth = { path = "../../crates/zen_auth" }
 tokio = { version = "1", features = ["full"] }
 jsonwebtoken = "9"
 bytes = "1"
+rand_core = { version = "0.6", features = ["std"] }
 chrono = { version = "0.4", features = ["serde"] }
 uuid = { version = "1", features = ["v4"] }
 serde = { version = "1", features = ["derive"] }

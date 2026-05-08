@@ -239,23 +239,27 @@ async fn three_node_cluster_with_hmac_inter_node_auth() {
             .iter()
             .map(|row| row["fields"]["count"].as_i64().unwrap_or(0))
             .sum();
-        assert_eq!(total, 50, "total from {url} = {total}");
+        // Don't include the random `url` in the panic message — CodeQL
+        // flags it as cleartext logging of an endpoint that was set up
+        // with a shared HMAC secret.
+        assert_eq!(total, 50, "unexpected total row count: {total}");
     }
 }
 
-/// A peer with the WRONG secret cannot reach `/v1/internal/query`.
+/// A peer with no HMAC header cannot reach `/v1/internal/query`. The
+/// request body is a no-op `SELECT 1` and contains no auth material —
+/// the test verifies that the absence of the `X-Zen-Hmac` header alone
+/// is enough for the receiver to return 401.
 #[tokio::test]
-async fn wrong_hmac_secret_is_rejected_at_internal_endpoint() {
+async fn missing_hmac_header_is_rejected_at_internal_endpoint() {
     let store: Arc<dyn BlobStore> = Arc::new(InMemoryStore::default());
     let catalog: Arc<dyn Catalog> = Arc::new(SqliteCatalog::open_in_memory().await.unwrap());
 
-    let (url, _reg) = spawn_node_with_secret(catalog, store, "real-secret").await;
+    let endpoint = spawn_hmac_protected_node(catalog, store).await;
 
     let client = reqwest::Client::new();
-    // Direct hit on the internal endpoint without the right secret →
-    // missing X-Zen-Hmac header → 401.
     let r = client
-        .post(format!("{url}/v1/internal/query"))
+        .post(format!("{endpoint}/v1/internal/query"))
         .json(&serde_json::json!({
             "tenant_id": 1,
             "query": "SELECT 1",
@@ -265,4 +269,20 @@ async fn wrong_hmac_secret_is_rejected_at_internal_endpoint() {
         .await
         .unwrap();
     assert_eq!(r.status().as_u16(), 401);
+}
+
+/// Spawn a node whose `internal_secret` is generated locally and never
+/// returned to the caller — the test only needs the endpoint URL. Keeps
+/// the secret out of the test scope so static analyzers don't flag the
+/// subsequent loopback request as "transmits sensitive data".
+async fn spawn_hmac_protected_node(
+    catalog: Arc<dyn Catalog>,
+    store: Arc<dyn BlobStore>,
+) -> String {
+    use rand_core::RngCore;
+    let mut secret = [0u8; 32];
+    rand_core::OsRng.fill_bytes(&mut secret);
+    let hex: String = secret.iter().map(|b| format!("{b:02x}")).collect();
+    let (endpoint, _reg) = spawn_node_with_secret(catalog, store, &hex).await;
+    endpoint
 }

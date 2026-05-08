@@ -46,16 +46,19 @@ async fn https_listener_serves_health() {
     });
     tokio::time::sleep(std::time::Duration::from_millis(200)).await;
 
-    // Build a reqwest client that trusts our self-signed cert.
+    // Build a reqwest client that trusts our self-signed CA. Hostname
+    // verification stays ENABLED — the cert SAN includes both
+    // `DNS:localhost` and `IP:127.0.0.1`, so we can validate strictly.
     let client = reqwest::Client::builder()
         .add_root_certificate(reqwest::Certificate::from_pem(CERT_PEM.as_bytes()).unwrap())
-        // Self-signed cert is for "localhost" but we connect via 127.0.0.1.
-        // Disable hostname verification only for this test client.
-        .danger_accept_invalid_hostnames(true)
         .build()
         .unwrap();
 
-    let url = format!("https://{}/v1/health", addr);
+    // Use the SAN-matching `localhost` hostname. The listener is bound
+    // to 127.0.0.1 which `localhost` resolves to on every supported
+    // platform, so this connects to the same socket while exercising
+    // strict hostname verification.
+    let url = format!("https://localhost:{}/v1/health", addr.port());
     let r = client.get(&url).send().await.unwrap();
     assert!(r.status().is_success(), "got {}", r.status());
 }

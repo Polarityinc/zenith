@@ -59,6 +59,10 @@ pub async fn open_blob_store(cfg: &Config) -> ZenResult<Arc<dyn BlobStore>> {
     }
 }
 
+/// Load a 32-byte AES-256 root key from disk. Accepts either raw bytes
+/// (the file is exactly 32 bytes) or 64 hex characters with optional
+/// whitespace. The output is always operator-supplied — there are no
+/// hard-coded fallback values; absence of the file is a hard error.
 fn load_root_key(path: &str) -> ZenResult<[u8; 32]> {
     if path.is_empty() {
         return Err(ZenError::storage(
@@ -68,9 +72,8 @@ fn load_root_key(path: &str) -> ZenResult<[u8; 32]> {
     let raw = std::fs::read(path)
         .map_err(|e| ZenError::storage(format!("read root key {path}: {e}")))?;
     if raw.len() == 32 {
-        let mut out = [0u8; 32];
-        out.copy_from_slice(&raw);
-        return Ok(out);
+        return <[u8; 32]>::try_from(raw.as_slice())
+            .map_err(|_| ZenError::storage("internal: 32-byte slice didn't fit"));
     }
     // Hex form — strip whitespace, decode.
     let trimmed: String = raw
@@ -79,12 +82,14 @@ fn load_root_key(path: &str) -> ZenResult<[u8; 32]> {
         .map(|b| *b as char)
         .collect();
     if trimmed.len() == 64 {
-        let mut out = [0u8; 32];
-        for (i, byte) in out.iter_mut().enumerate() {
-            *byte = u8::from_str_radix(&trimmed[i * 2..i * 2 + 2], 16)
-                .map_err(|e| ZenError::storage(format!("bad hex root key: {e}")))?;
-        }
-        return Ok(out);
+        let decoded: Vec<u8> = (0..32)
+            .map(|i| {
+                u8::from_str_radix(&trimmed[i * 2..i * 2 + 2], 16)
+                    .map_err(|e| ZenError::storage(format!("bad hex root key: {e}")))
+            })
+            .collect::<Result<_, _>>()?;
+        return <[u8; 32]>::try_from(decoded.as_slice())
+            .map_err(|_| ZenError::storage("internal: hex decode produced wrong length"));
     }
     Err(ZenError::storage(format!(
         "root key file must be 32 bytes raw or 64 hex chars; got {} bytes",
