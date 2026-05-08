@@ -26,11 +26,23 @@ pub struct SegmentExtras {
     posting_results: RwLock<HashMap<(u32, u32, u64), Arc<RoaringBitmap>>>,
     fts: RwLock<HashMap<u32, Arc<zen_fts::FtsHandle>>>,
     jsonpath: RwLock<HashMap<u32, Arc<zen_jsonpath::JsonPathIndex>>>,
-    fts_results: RwLock<HashMap<(u32, u64, u64), Arc<RoaringBitmap>>>,
-    jsonpath_results: RwLock<HashMap<(u32, u64, u64), Arc<RoaringBitmap>>>,
+    fts_results: RwLock<HashMap<(u32, u64, u64, usize), Arc<RoaringBitmap>>>,
+    jsonpath_results: RwLock<HashMap<(u32, u64, u64, usize), Arc<RoaringBitmap>>>,
 }
 
 const MAX_RESULT_ENTRIES: usize = 32_768;
+const FULL_RESULT_LIMIT: usize = usize::MAX;
+
+fn limited_bitmap_clone(bitmap: &RoaringBitmap, limit: Option<usize>) -> RoaringBitmap {
+    let Some(limit) = limit else {
+        return bitmap.clone();
+    };
+    let mut out = RoaringBitmap::new();
+    for row in bitmap.iter().take(limit) {
+        out.push(row);
+    }
+    out
+}
 
 fn cap_insert<K: Eq + std::hash::Hash + Clone, V>(map: &RwLock<HashMap<K, V>>, k: K, v: V) {
     let mut g = map.write();
@@ -85,11 +97,13 @@ impl SegmentExtras {
         rg_idx: u32,
         column: &str,
         query: &str,
+        limit: usize,
     ) -> Option<Arc<RoaringBitmap>> {
         let key = (
             rg_idx,
             xxhash_rust::xxh3::xxh3_64(column.as_bytes()),
             xxhash_rust::xxh3::xxh3_64(query.as_bytes()),
+            limit,
         );
         if let Some(bm) = self.fts_results.read().get(&key) {
             return Some(bm.clone());
@@ -98,7 +112,7 @@ impl SegmentExtras {
         let q = zen_fts::FtsQuery {
             field: Some(column),
             query,
-            limit: 100_000,
+            limit,
         };
         let bm = handle.search_to_bitmap(&q).ok()?;
         let bm = Arc::new(bm);
@@ -110,6 +124,14 @@ impl SegmentExtras {
         if let Some(h) = self.jsonpath.read().get(&rg_idx) {
             return Some(h.clone());
         }
+        let bytes = self.jsonpath_blob(rg_idx)?;
+        let idx = zen_jsonpath::JsonPathIndex::deserialize(bytes).ok()?;
+        let arc = Arc::new(idx);
+        self.jsonpath.write().insert(rg_idx, arc.clone());
+        Some(arc)
+    }
+
+    fn jsonpath_blob(&self, rg_idx: u32) -> Option<&[u8]> {
         let rg = self.reader.hotcache.row_groups.get(rg_idx as usize)?;
         let entry = rg
             .columns
@@ -123,11 +145,7 @@ impl SegmentExtras {
         if self.reader.bytes.len() < end {
             return None;
         }
-        let bytes = &self.reader.bytes[start..end];
-        let idx = zen_jsonpath::JsonPathIndex::deserialize(bytes).ok()?;
-        let arc = Arc::new(idx);
-        self.jsonpath.write().insert(rg_idx, arc.clone());
-        Some(arc)
+        Some(&self.reader.bytes[start..end])
     }
 
     pub fn jsonpath_lookup_cached(
@@ -135,20 +153,38 @@ impl SegmentExtras {
         rg_idx: u32,
         path: &str,
         value: &str,
+        limit: Option<usize>,
     ) -> Option<Arc<RoaringBitmap>> {
+        let limit_key = limit.unwrap_or(FULL_RESULT_LIMIT);
         let key = (
             rg_idx,
             xxhash_rust::xxh3::xxh3_64(path.as_bytes()),
             xxhash_rust::xxh3::xxh3_64(value.as_bytes()),
+            limit_key,
         );
         if let Some(bm) = self.jsonpath_results.read().get(&key) {
             return Some(bm.clone());
         }
-        let idx = self.jsonpath_index(rg_idx)?;
-        if !idx.knows_path(path) {
-            return None;
+        if limit.is_some() {
+            let full_key = (key.0, key.1, key.2, FULL_RESULT_LIMIT);
+            if let Some(full) = self.jsonpath_results.read().get(&full_key) {
+                let bm = Arc::new(limited_bitmap_clone(full, limit));
+                cap_insert(&self.jsonpath_results, key, bm.clone());
+                return Some(bm);
+            }
         }
-        let bm = idx.lookup(path, value).cloned().unwrap_or_default();
+        let bm = if let Some(idx) = self.jsonpath.read().get(&rg_idx) {
+            if !idx.knows_path(path) {
+                return None;
+            }
+            idx.lookup(path, value)
+                .map(|bm| limited_bitmap_clone(bm, limit))
+                .unwrap_or_default()
+        } else {
+            let bytes = self.jsonpath_blob(rg_idx)?;
+            let bm = zen_jsonpath::JsonPathIndex::lookup_serialized(bytes, path, value).ok()??;
+            limited_bitmap_clone(&bm, limit)
+        };
         let bm = Arc::new(bm);
         cap_insert(&self.jsonpath_results, key, bm.clone());
         Some(bm)
@@ -187,7 +223,8 @@ impl SegmentExtras {
         value: &[u8],
     ) -> Option<Arc<RoaringBitmap>> {
         let h = xxhash_rust::xxh3::xxh3_64(value);
-        if let Some(bm) = self.posting_results.read().get(&(rg_idx, column_idx, h)) {
+        let key = (rg_idx, column_idx, h);
+        if let Some(bm) = self.posting_results.read().get(&key) {
             return Some(bm.clone());
         }
         let pm = self.posting_map(rg_idx, column_idx)?;
@@ -196,7 +233,7 @@ impl SegmentExtras {
             .map(|pl| pl.bitmap.clone())
             .unwrap_or_default();
         let bm = Arc::new(bm);
-        cap_insert(&self.posting_results, (rg_idx, column_idx, h), bm.clone());
+        cap_insert(&self.posting_results, key, bm.clone());
         Some(bm)
     }
 }
