@@ -13,7 +13,9 @@ pub fn scan_path_eq(rows: &[Option<&Value>], path: &str, value: &str) -> Roaring
         let Some(v) = row else { continue };
         let mut hit = false;
         walk(v, "", 0, 8, &mut |p, scalar| {
-            if hit { return; }
+            if hit {
+                return;
+            }
             if p == path {
                 if let Some(s) = scalar {
                     if s == value {

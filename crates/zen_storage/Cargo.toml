@@ -9,6 +9,8 @@ license.workspace = true
 zen_common = { workspace = true }
 object_store = { workspace = true }
 moka = { workspace = true }
+parking_lot = "0.12"
+zen_crypto = { workspace = true }
 tokio = { workspace = true }
 tokio-util = { workspace = true }
 futures = { workspace = true }

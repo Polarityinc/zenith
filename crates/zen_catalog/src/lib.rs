@@ -81,6 +81,28 @@ pub trait Catalog: Send + Sync + 'static {
 
     /// Used by query planners that hold per-tenant info: list segments by tenant.
     async fn list_segments_for_tenant(&self, tenant: TenantId) -> ZenResult<Vec<SegmentRow>>;
+
+    /// Mark a set of segments as superseded by a tier-2 / tier-N compaction.
+    /// Superseded segments are no longer returned by `list_segments_*`.
+    ///
+    /// SECURITY: scoped by `tenant` so a buggy or malicious caller (or
+    /// future endpoint) can't supersede another tenant's segments by
+    /// guessing a segment_id UUID.
+    async fn mark_segments_superseded(
+        &self,
+        tenant: TenantId,
+        segment_ids: &[uuid::Uuid],
+        at: DateTime<Utc>,
+    ) -> ZenResult<u64>;
+
+    /// Upsert this node's heartbeat row. Called by every node on a 500 ms
+    /// tick (`zen_cluster::NodeRegistry`). Used to drive the cluster's
+    /// shard map.
+    async fn upsert_node(&self, row: NodeRow) -> ZenResult<()>;
+
+    /// List all known node rows, including stale ones — the cluster layer
+    /// filters by heartbeat TTL when computing the shard map.
+    async fn list_nodes(&self) -> ZenResult<Vec<NodeRow>>;
 }
 
 pub async fn open_catalog(cfg: &Config) -> ZenResult<Arc<dyn Catalog>> {

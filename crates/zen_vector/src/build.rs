@@ -72,8 +72,8 @@ pub fn build_hnsw_index(
         ef_construction: opts.ef_construction,
         max_elements: opts.max_elements,
     };
-    let header_bytes = serde_json::to_vec(&header)
-        .map_err(|e| ZenError::format(format!("vector header: {e}")))?;
+    let header_bytes =
+        serde_json::to_vec(&header).map_err(|e| ZenError::format(format!("vector header: {e}")))?;
 
     let total = 4 + header_bytes.len() + vectors.len() * (4 + opts.dimensions * 4);
     let mut out = BytesMut::with_capacity(total);

@@ -2,7 +2,7 @@
 
 use sqlparser::ast::{
     BinaryOperator, Expr as SqlExpr, FunctionArg, FunctionArgExpr, FunctionArguments, GroupByExpr,
-    Query, Select, SelectItem, SetExpr, Statement, TableFactor, Value,
+    Query, SelectItem, SetExpr, Statement, TableFactor, Value,
 };
 use sqlparser::dialect::GenericDialect;
 use sqlparser::parser::Parser;
@@ -13,8 +13,8 @@ use zen_query::logical::{AggregateFn, LogicalPlan, Predicate, Projection};
 
 pub fn parse_sql(sql: &str, tenant_id: u64) -> Result<LogicalPlan, ZenError> {
     let dialect = GenericDialect {};
-    let stmts = Parser::parse_sql(&dialect, sql)
-        .map_err(|e| ZenError::query(format!("sql parse: {e}")))?;
+    let stmts =
+        Parser::parse_sql(&dialect, sql).map_err(|e| ZenError::query(format!("sql parse: {e}")))?;
     if stmts.len() != 1 {
         return Err(ZenError::query("expected exactly one statement"));
     }
@@ -64,7 +64,9 @@ fn parse_query(q: &Query, tenant_id: u64) -> Result<LogicalPlan, ZenError> {
 
     // WHERE.
     if let Some(w) = &select.selection {
-        plan.predicate = Some(Predicate { expr: parse_expr(w)? });
+        plan.predicate = Some(Predicate {
+            expr: parse_expr(w)?,
+        });
     }
 
     // GROUP BY.
@@ -86,11 +88,9 @@ fn parse_query(q: &Query, tenant_id: u64) -> Result<LogicalPlan, ZenError> {
     }
 
     // LIMIT.
-    if let Some(SqlExpr::Value(v)) = &q.limit {
-        if let Value::Number(n, _) = v {
-            if let Ok(parsed) = n.parse::<u32>() {
-                plan.limit = Some(parsed);
-            }
+    if let Some(SqlExpr::Value(Value::Number(n, _))) = &q.limit {
+        if let Ok(parsed) = n.parse::<u32>() {
+            plan.limit = Some(parsed);
         }
     }
     Ok(plan)
@@ -104,7 +104,10 @@ fn parse_projection(items: &[SelectItem]) -> Result<Projection, ZenError> {
     for item in items {
         match item {
             SelectItem::UnnamedExpr(SqlExpr::Identifier(id)) => cols.push(id.value.clone()),
-            SelectItem::ExprWithAlias { expr: SqlExpr::Identifier(id), alias } => {
+            SelectItem::ExprWithAlias {
+                expr: SqlExpr::Identifier(id),
+                alias,
+            } => {
                 let _ = alias;
                 cols.push(id.value.clone());
             }
@@ -192,10 +195,8 @@ fn arg_col_and_float(args: &FunctionArguments) -> (Option<String>, Option<f64>) 
                         col = Some(id.value.clone());
                     }
                 } else if i == 1 {
-                    if let SqlExpr::Value(v) = e {
-                        if let Value::Number(n, _) = v {
-                            q = n.parse::<f64>().ok();
-                        }
+                    if let SqlExpr::Value(Value::Number(n, _)) = e {
+                        q = n.parse::<f64>().ok();
                     }
                 }
             }
@@ -204,7 +205,21 @@ fn arg_col_and_float(args: &FunctionArguments) -> (Option<String>, Option<f64>) 
     (col, q)
 }
 
+/// Maximum recursion depth for `parse_expr`. Hard cap to prevent
+/// stack overflow on adversarial nested expressions like
+/// `((((((... a OR b))))))`. Real queries fit in <20 levels.
+const MAX_EXPR_DEPTH: u32 = 64;
+
 fn parse_expr(e: &SqlExpr) -> Result<Expr, ZenError> {
+    parse_expr_rec(e, 0)
+}
+
+fn parse_expr_rec(e: &SqlExpr, depth: u32) -> Result<Expr, ZenError> {
+    if depth > MAX_EXPR_DEPTH {
+        return Err(ZenError::query(format!(
+            "expression too deeply nested (>{MAX_EXPR_DEPTH} levels) — possible adversarial input"
+        )));
+    }
     match e {
         SqlExpr::Identifier(id) => Ok(Expr::col(id.value.clone())),
         SqlExpr::CompoundIdentifier(parts) => {
@@ -234,11 +249,12 @@ fn parse_expr(e: &SqlExpr) -> Result<Expr, ZenError> {
             other => Err(ZenError::query(format!("unsupported literal: {other:?}"))),
         },
         SqlExpr::BinaryOp { left, op, right } => {
-            let l = parse_expr(left)?;
-            let r = parse_expr(right)?;
+            let l = parse_expr_rec(left, depth + 1)?;
+            let r = parse_expr_rec(right, depth + 1)?;
             // Metadata-prefix → JsonPathEq if both sides match.
             if let (Expr::Column(c), Expr::Literal(Literal::String(v))) = (&l, &r) {
-                if c.contains('.') && c.starts_with("metadata.") && matches!(op, BinaryOperator::Eq) {
+                if c.contains('.') && c.starts_with("metadata.") && matches!(op, BinaryOperator::Eq)
+                {
                     let path = c.trim_start_matches("metadata.").to_string();
                     return Ok(Expr::JsonPathEq {
                         path,
@@ -261,7 +277,7 @@ fn parse_expr(e: &SqlExpr) -> Result<Expr, ZenError> {
         SqlExpr::UnaryOp {
             op: sqlparser::ast::UnaryOperator::Not,
             expr,
-        } => Ok(Expr::Not(Box::new(parse_expr(expr)?))),
+        } => Ok(Expr::Not(Box::new(parse_expr_rec(expr, depth + 1)?))),
         SqlExpr::Function(f) => {
             let name = f.name.to_string();
             let name_lower = name.to_lowercase();
@@ -270,24 +286,33 @@ fn parse_expr(e: &SqlExpr) -> Result<Expr, ZenError> {
                     FunctionArguments::List(l) => l.args.iter(),
                     _ => return Err(ZenError::query("text_match requires args")),
                 };
-                let col = args_iter.next().ok_or_else(|| ZenError::query("text_match needs column"))?;
-                let qarg = args_iter.next().ok_or_else(|| ZenError::query("text_match needs query"))?;
+                let col = args_iter
+                    .next()
+                    .ok_or_else(|| ZenError::query("text_match needs column"))?;
+                let qarg = args_iter
+                    .next()
+                    .ok_or_else(|| ZenError::query("text_match needs query"))?;
                 let column = match col {
-                    FunctionArg::Unnamed(FunctionArgExpr::Expr(SqlExpr::Identifier(id))) => id.value.clone(),
+                    FunctionArg::Unnamed(FunctionArgExpr::Expr(SqlExpr::Identifier(id))) => {
+                        id.value.clone()
+                    }
                     _ => return Err(ZenError::query("text_match arg 1 must be column")),
                 };
                 let query = match qarg {
-                    FunctionArg::Unnamed(FunctionArgExpr::Expr(SqlExpr::Value(v))) => match v {
-                        Value::SingleQuotedString(s) | Value::DoubleQuotedString(s) => s.clone(),
-                        _ => return Err(ZenError::query("text_match arg 2 must be string literal")),
-                    },
+                    FunctionArg::Unnamed(FunctionArgExpr::Expr(SqlExpr::Value(
+                        Value::SingleQuotedString(s) | Value::DoubleQuotedString(s),
+                    ))) => s.clone(),
                     _ => return Err(ZenError::query("text_match arg 2 must be string literal")),
                 };
                 return Ok(Expr::TextMatch { column, query });
             }
-            Err(ZenError::query(format!("unsupported function in WHERE: {name}")))
+            Err(ZenError::query(format!(
+                "unsupported function in WHERE: {name}"
+            )))
         }
-        other => Err(ZenError::query(format!("unsupported expression: {other:?}"))),
+        other => Err(ZenError::query(format!(
+            "unsupported expression: {other:?}"
+        ))),
     }
 }
 
@@ -330,11 +355,7 @@ mod tests {
 
     #[test]
     fn parse_group_by_count() {
-        let p = parse_sql(
-            "SELECT model, count(*) AS n FROM spans GROUP BY model",
-            1,
-        )
-        .unwrap();
+        let p = parse_sql("SELECT model, count(*) AS n FROM spans GROUP BY model", 1).unwrap();
         assert_eq!(p.group_by, vec!["model".to_string()]);
         assert_eq!(p.aggregates.len(), 1);
         match &p.aggregates[0].1 {

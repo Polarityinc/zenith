@@ -1,0 +1,113 @@
+name: Bug report
+description: Something is broken or behaves unexpectedly.
+title: "bug: <short description>"
+labels: ["bug", "triage"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for filing a bug report. The more specific you can be, the faster we can fix it.
+        For security issues, **do not file a public issue** — see [SECURITY.md](../SECURITY.md).
+
+  - type: textarea
+    id: summary
+    attributes:
+      label: Summary
+      description: A one- or two-sentence description of the bug.
+      placeholder: "Compactor panics when a segment contains zero rows after predicate pushdown."
+    validations:
+      required: true
+
+  - type: textarea
+    id: repro
+    attributes:
+      label: Steps to reproduce
+      description: Minimal steps. Include config, sample data, and queries if relevant.
+      placeholder: |
+        1. Start `zen serve --config examples/zenithdb.dev.toml`.
+        2. Ingest the attached payload via `POST /v1/ingest`.
+        3. Run query `…`.
+        4. Observe panic.
+      render: markdown
+    validations:
+      required: true
+
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected behavior
+    validations:
+      required: true
+
+  - type: textarea
+    id: actual
+    attributes:
+      label: Actual behavior
+      description: Include error messages, panics, and logs at `RUST_LOG=zen=debug` if relevant.
+    validations:
+      required: true
+
+  - type: input
+    id: version
+    attributes:
+      label: ZenithDB version
+      description: Output of `zen --version` or git SHA if building from source.
+      placeholder: "0.1.0 (sha 0d169d3)"
+    validations:
+      required: true
+
+  - type: dropdown
+    id: backend
+    attributes:
+      label: Storage backend
+      options:
+        - "fs (local)"
+        - s3
+        - gcs
+        - azure
+        - memory
+        - other (describe below)
+    validations:
+      required: true
+
+  - type: dropdown
+    id: catalog
+    attributes:
+      label: Catalog backend
+      options:
+        - sqlite
+        - postgres
+    validations:
+      required: true
+
+  - type: input
+    id: os
+    attributes:
+      label: OS / arch
+      placeholder: "macOS 14.5 arm64 / Ubuntu 24.04 x86_64 / …"
+    validations:
+      required: true
+
+  - type: textarea
+    id: config
+    attributes:
+      label: Relevant config
+      description: Paste the relevant section of your config (with secrets redacted).
+      render: toml
+
+  - type: textarea
+    id: logs
+    attributes:
+      label: Logs
+      description: Logs at `RUST_LOG=zen=debug` if available.
+      render: shell
+
+  - type: checkboxes
+    id: checks
+    attributes:
+      label: Pre-flight
+      options:
+        - label: I searched existing issues and didn't find a duplicate.
+          required: true
+        - label: This is not a security vulnerability (those go to SECURITY.md).
+          required: true

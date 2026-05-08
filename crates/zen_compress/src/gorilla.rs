@@ -42,7 +42,11 @@ impl BitWriter {
         if n > 32 {
             let hi_n = n - 32;
             self.write_bits_inner(value & 0xFFFF_FFFF, 32);
-            let hi_mask = if hi_n == 64 { u64::MAX } else { (1u64 << hi_n) - 1 };
+            let hi_mask = if hi_n == 64 {
+                u64::MAX
+            } else {
+                (1u64 << hi_n) - 1
+            };
             self.write_bits_inner((value >> 32) & hi_mask, hi_n);
             return;
         }
@@ -50,8 +54,12 @@ impl BitWriter {
     }
 
     fn write_bits_inner(&mut self, value: u64, n: u8) {
-        debug_assert!(n >= 1 && n <= 32);
-        let mask = if n == 32 { 0xFFFF_FFFFu64 } else { (1u64 << n) - 1 };
+        debug_assert!((1..=32).contains(&n));
+        let mask = if n == 32 {
+            0xFFFF_FFFFu64
+        } else {
+            (1u64 << n) - 1
+        };
         let masked = value & mask;
         self.buf |= masked << self.bits;
         self.bits += n;
@@ -102,7 +110,7 @@ impl<'a> BitReader<'a> {
     }
 
     fn read_bits_inner(&mut self, n: u8) -> Result<u64, ZenError> {
-        debug_assert!(n >= 1 && n <= 32);
+        debug_assert!((1..=32).contains(&n));
         while self.bits < n {
             if self.pos >= self.src.len() {
                 return Err(ZenError::compress("gorilla EOF mid-bits"));
@@ -111,7 +119,11 @@ impl<'a> BitReader<'a> {
             self.pos += 1;
             self.bits += 8;
         }
-        let mask = if n == 32 { 0xFFFF_FFFFu64 } else { (1u64 << n) - 1 };
+        let mask = if n == 32 {
+            0xFFFF_FFFFu64
+        } else {
+            (1u64 << n) - 1
+        };
         let v = self.buf & mask;
         self.buf >>= n;
         self.bits -= n;
@@ -141,7 +153,7 @@ pub fn gorilla_encode(values: &[f64]) -> Result<Bytes, ZenError> {
             let trail = xor.trailing_zeros() as u8;
             // After shifting, the meaningful bits are 64 - trail wide (1..=64).
             let payload_bits = 64 - trail; // 1..=64
-            // Write trail in 6 bits (0..=63 fits).
+                                           // Write trail in 6 bits (0..=63 fits).
             w.write_bits(trail as u64, 6);
             let payload = xor >> trail;
             w.write_bits(payload, payload_bits);
@@ -212,9 +224,9 @@ mod tests {
 
     #[test]
     fn one_value() {
-        let bytes = gorilla_encode(&[3.14]).unwrap();
+        let bytes = gorilla_encode(&[3.7]).unwrap();
         let v = gorilla_decompress(&bytes).unwrap();
-        assert_eq!(v, vec![3.14]);
+        assert_eq!(v, vec![3.7]);
     }
 
     #[test]

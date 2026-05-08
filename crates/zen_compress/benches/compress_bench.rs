@@ -138,10 +138,18 @@ fn bench_rle(c: &mut Criterion) {
 
 fn bench_dict(c: &mut Criterion) {
     let mut group = c.benchmark_group("dict");
-    let models = ["gpt-4o", "claude-sonnet-4-7", "gpt-5-mini", "haiku-4-5", "o4-mini"];
+    let models = [
+        "gpt-4o",
+        "claude-sonnet-4-7",
+        "gpt-5-mini",
+        "haiku-4-5",
+        "o4-mini",
+    ];
     let mut rng = StdRng::seed_from_u64(11);
     let n = 16_384;
-    let raw_bytes: u64 = (0..n).map(|_| models[rng.gen_range(0..models.len())].len() as u64).sum();
+    let raw_bytes: u64 = (0..n)
+        .map(|_| models[rng.gen_range(0..models.len())].len() as u64)
+        .sum();
     group.throughput(Throughput::Bytes(raw_bytes));
     group.bench_function("encode_16k_low_card", |b| {
         b.iter_batched(

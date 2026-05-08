@@ -14,10 +14,27 @@ spec:
       labels:
         app.kubernetes.io/name: zenithdb
     spec:
+      serviceAccountName: {{ .Values.serviceAccount.name | default .Release.Name }}
+      automountServiceAccountToken: {{ .Values.serviceAccount.automountToken }}
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65532
+        runAsGroup: 65532
+        fsGroup: 65532
+        seccompProfile:
+          type: RuntimeDefault
       containers:
         - name: zenithdb
           image: "{{ .Values.image.repository }}:{{ .Values.image.tag }}"
           imagePullPolicy: {{ .Values.image.pullPolicy }}
+          securityContext:
+            runAsNonRoot: true
+            runAsUser: 65532
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop:
+                - ALL
           ports:
             - name: http
               containerPort: 8080
@@ -25,11 +42,16 @@ spec:
               containerPort: 50051
           env:
             - name: ZEN_CATALOG_BACKEND
-              value: {{ .Values.catalog.backend }}
+              value: {{ .Values.catalog.backend | quote }}
+            {{- if .Values.catalog.existingSecret }}
             - name: ZEN_POSTGRES_URL
-              value: {{ .Values.catalog.postgresUrl }}
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.catalog.existingSecret }}
+                  key: {{ .Values.catalog.existingSecretKey | default "url" }}
+            {{- end }}
             - name: ZEN_STORAGE_BACKEND
-              value: {{ .Values.storage.backend }}
+              value: {{ .Values.storage.backend | quote }}
           resources:
             {{- toYaml .Values.resources | nindent 12 }}
           {{- if .Values.nvmeCache.enabled }}
@@ -38,15 +60,25 @@ spec:
               mountPath: /var/cache/zenithdb
           {{- end }}
           livenessProbe:
+            # Liveness == process up. Cheap; just confirms the axum task
+            # is reachable. Don't include catalog calls here — a brief
+            # catalog hiccup shouldn't restart the pod.
             httpGet:
-              path: /v1/health
+              path: /v1/healthz
               port: http
             initialDelaySeconds: 5
+            periodSeconds: 10
+            failureThreshold: 3
           readinessProbe:
+            # Readiness gates traffic. Includes a catalog probe so a node
+            # whose Postgres is unreachable falls out of the LB endpoint
+            # set rather than serving 5xx.
             httpGet:
-              path: /v1/health
+              path: /v1/readyz
               port: http
             initialDelaySeconds: 5
+            periodSeconds: 5
+            failureThreshold: 3
       {{- if .Values.nvmeCache.enabled }}
       volumes:
         - name: cache

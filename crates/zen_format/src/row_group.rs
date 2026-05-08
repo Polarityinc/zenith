@@ -76,7 +76,8 @@ impl RowGroupBuilder {
         bytes: Vec<u8>,
         uncompressed_size: u64,
     ) {
-        self.buffers.push((column_idx, encoding, bytes, uncompressed_size));
+        self.buffers
+            .push((column_idx, encoding, bytes, uncompressed_size));
     }
 
     /// Finalize: returns (concatenated page payloads, header).

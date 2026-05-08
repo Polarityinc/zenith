@@ -93,9 +93,8 @@ impl DictBuilder {
         }
         let compressed = lz4_flex::compress_prepend_size(&raw_keys);
 
-        let mut out = BytesMut::with_capacity(
-            4 + 4 + 1 + 4 + dict_buf.len() + 4 + compressed.len(),
-        );
+        let mut out =
+            BytesMut::with_capacity(4 + 4 + 1 + 4 + dict_buf.len() + 4 + compressed.len());
         out.put_u32_le(row_count as u32);
         out.put_u32_le(dict_size as u32);
         out.put_u8(key_width);
@@ -199,7 +198,9 @@ impl DictDecoder {
     }
 
     pub fn iter_rows(&self) -> impl Iterator<Item = &[u8]> + '_ {
-        self.keys.iter().map(move |k| self.dict[*k as usize].as_slice())
+        self.keys
+            .iter()
+            .map(move |k| self.dict[*k as usize].as_slice())
     }
 }
 
@@ -210,7 +211,13 @@ mod tests {
     #[test]
     fn small_roundtrip() {
         let mut b = DictBuilder::new();
-        for v in &["gpt-4o", "claude-sonnet-4-7", "gpt-4o", "gpt-4o", "gpt-5-mini"] {
+        for v in &[
+            "gpt-4o",
+            "claude-sonnet-4-7",
+            "gpt-4o",
+            "gpt-4o",
+            "gpt-5-mini",
+        ] {
             b.push(v.as_bytes());
         }
         let bytes = b.finish().unwrap();

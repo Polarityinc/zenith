@@ -4,7 +4,6 @@ use std::io::Cursor;
 
 use arrow_array::RecordBatch;
 use arrow_ipc::reader::StreamReader;
-use bytes::Bytes;
 
 use zen_common::{ZenError, ZenResult};
 
@@ -16,8 +15,13 @@ impl WalReader {
     /// Parse a WAL object into its header + a vector of record batches.
     /// Most flushes produce exactly one batch, but Arrow IPC streams may have many.
     pub fn parse(bytes: &[u8]) -> ZenResult<(WalHeader, Vec<RecordBatch>)> {
-        let (header, payload_zstd) = parse_wal_object(bytes)?;
-        let arrow_bytes = zen_compress::zstd_decompress(&payload_zstd)?;
+        let (header, payload) = parse_wal_object(bytes)?;
+        // LZ4 (matches the writer); falls back to ZSTD if the LZ4 decode
+        // fails so old WAL files written before the switch still load.
+        let arrow_bytes = match lz4_flex::decompress_size_prepended(&payload) {
+            Ok(b) => b,
+            Err(_) => zen_compress::zstd_decompress(&payload)?.to_vec(),
+        };
         Self::read_arrow_batches(&arrow_bytes).map(|b| (header, b))
     }
 
@@ -80,17 +84,16 @@ mod tests {
     #[tokio::test]
     async fn concurrent_writers_do_not_overwrite() {
         let store: Arc<dyn BlobStore> = Arc::new(InMemoryStore::default());
-        let schema = Arc::new(ArrowSchema::new(vec![Field::new("id", DataType::Int64, false)]));
-        let batch_a = RecordBatch::try_new(
-            schema.clone(),
-            vec![Arc::new(Int64Array::from(vec![1i64]))],
-        )
-        .unwrap();
-        let batch_b = RecordBatch::try_new(
-            schema,
-            vec![Arc::new(Int64Array::from(vec![2i64]))],
-        )
-        .unwrap();
+        let schema = Arc::new(ArrowSchema::new(vec![Field::new(
+            "id",
+            DataType::Int64,
+            false,
+        )]));
+        let batch_a =
+            RecordBatch::try_new(schema.clone(), vec![Arc::new(Int64Array::from(vec![1i64]))])
+                .unwrap();
+        let batch_b =
+            RecordBatch::try_new(schema, vec![Arc::new(Int64Array::from(vec![2i64]))]).unwrap();
 
         // Two writers with the same (tenant, partition, commit_id) but different ulids.
         // They should not collide because ulid is regenerated.

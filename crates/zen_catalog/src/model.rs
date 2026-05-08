@@ -41,3 +41,13 @@ pub struct SegmentRow {
     pub superseded_at: Option<DateTime<Utc>>,
     pub created_at: DateTime<Utc>,
 }
+
+/// Cluster node row. Used by `zen_cluster::NodeRegistry`.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct NodeRow {
+    pub node_id: uuid::Uuid,
+    pub endpoint: String,
+    pub role: String,
+    pub shards: String,
+    pub last_heartbeat_ms: i64,
+}

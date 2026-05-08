@@ -16,10 +16,12 @@ zen_ql = { workspace = true }
 zen_catalog = { workspace = true }
 zen_storage = { workspace = true }
 zen_format = { workspace = true }
+zen_compactor = { workspace = true }
 arrow = { workspace = true }
 arrow-array = { workspace = true }
 arrow-schema = { workspace = true }
 arrow-ipc = { workspace = true }
+bytes = { workspace = true }
 reqwest = { workspace = true }
 tokio = { workspace = true }
 futures = { workspace = true }
@@ -30,6 +32,7 @@ rand = { workspace = true }
 rand_chacha = { workspace = true }
 rand_distr = { workspace = true }
 ulid = { workspace = true }
+uuid = { workspace = true }
 chrono = { workspace = true }
 clap = { workspace = true }
 tracing = { workspace = true }

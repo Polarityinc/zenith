@@ -9,9 +9,7 @@ use arrow_array::{
     UInt64Array,
 };
 
-use zen_common::{
-    CommitId, PartitionId, SpanId, SpanRecord, TenantId, TraceId, ZenError, ZenResult,
-};
+use zen_common::{CommitId, PartitionId, SpanId, SpanRecord, TenantId, TraceId, ZenResult};
 use zen_storage::BlobStore;
 use zen_wal::WalReader;
 
@@ -21,10 +19,7 @@ pub struct MergedRows {
 }
 
 /// Merge WAL objects from `keys` into a single sorted, tombstone-resolved list.
-pub async fn merge_wals(
-    store: Arc<dyn BlobStore>,
-    wal_keys: &[String],
-) -> ZenResult<MergedRows> {
+pub async fn merge_wals(store: Arc<dyn BlobStore>, wal_keys: &[String]) -> ZenResult<MergedRows> {
     if wal_keys.is_empty() {
         return Ok(MergedRows {
             rows: Vec::new(),
