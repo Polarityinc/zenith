@@ -35,9 +35,12 @@ pub async fn jwt_layer(
     let verifier = match state.auth.jwt.as_ref() {
         Some(v) => v.clone(),
         None => {
-            // Auth disabled. Insert a permissive claim so handlers don't
-            // crash when extracting; the tenant_id will fall back to the
-            // body field (legacy path) and won't be cross-checked.
+            // Auth disabled (single-node / dev). Insert a marker claim
+            // so handlers don't crash when extracting. The `anonymous`
+            // sub flag tells `enforce_tenant` to allow any request body
+            // tenant_id (otherwise dev would be unusable). Scope is
+            // intentionally permissive ONLY in this off-mode; real
+            // tokens carry whatever scope the IdP minted.
             req.extensions_mut().insert(Claims {
                 sub: "anonymous".into(),
                 tenant_id: 0,
@@ -128,6 +131,11 @@ impl AuthState {
     /// Build from config. Empty auth fields mean auth is OFF.
     pub fn from_config(cfg: &zen_common::Config) -> Self {
         let jwt = if cfg.auth.jwks_url.is_empty() {
+            tracing::warn!(
+                "SECURITY: auth.jwks_url is empty — JWT verification is DISABLED. \
+                 Anonymous traffic gets ingest+read+admin scope. \
+                 Do not run this configuration in production."
+            );
             None
         } else {
             Some(JwtVerifier::new(
@@ -136,11 +144,24 @@ impl AuthState {
             ))
         };
         let hmac = if cfg.auth.internal_secret.is_empty() {
+            tracing::warn!(
+                "SECURITY: auth.internal_secret is empty — inter-node \
+                 /v1/internal/* is OPEN. Set a 32+ byte secret on every \
+                 cluster node before exposing the port externally."
+            );
             None
         } else {
-            Some(zen_auth::HmacVerifier::new(
-                cfg.auth.internal_secret.as_bytes().to_vec(),
-            ))
+            match zen_auth::HmacVerifier::new(cfg.auth.internal_secret.as_bytes().to_vec()) {
+                Ok(v) => Some(v),
+                Err(e) => {
+                    tracing::error!(
+                        error = %e,
+                        "auth.internal_secret rejected: HMAC layer disabled. \
+                         Provide a 32+ byte secret to enable."
+                    );
+                    None
+                }
+            }
         };
         Self { jwt, hmac }
     }

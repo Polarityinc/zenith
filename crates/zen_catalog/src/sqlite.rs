@@ -413,6 +413,7 @@ impl Catalog for SqliteCatalog {
 
     async fn mark_segments_superseded(
         &self,
+        tenant: TenantId,
         segment_ids: &[uuid::Uuid],
         at: DateTime<Utc>,
     ) -> ZenResult<u64> {
@@ -421,11 +422,17 @@ impl Catalog for SqliteCatalog {
         }
         let mut total: u64 = 0;
         for id in segment_ids {
+            // SECURITY: scope by tenant_id so a caller can never
+            // supersede another tenant's segments by guessing the UUID.
             let r = sqlx::query(
-                "UPDATE segments SET superseded_at=?1 WHERE segment_id=?2 AND superseded_at IS NULL",
+                "UPDATE segments SET superseded_at=?1
+                 WHERE segment_id=?2
+                   AND tenant_id=?3
+                   AND superseded_at IS NULL",
             )
             .bind(at.to_rfc3339())
             .bind(id.as_bytes().to_vec())
+            .bind(tenant.0 as i64)
             .execute(&self.pool)
             .await
             .map_err(|e| ZenError::catalog(format!("mark superseded: {e}")))?;

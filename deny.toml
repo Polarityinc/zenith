@@ -38,5 +38,8 @@ deny = []
 
 [sources]
 unknown-registry = "deny"
-unknown-git = "warn"
+# Reject any unknown git source. Catches accidental Cargo.lock edits
+# pulling code from a malicious git repo (supply-chain attack vector).
+unknown-git = "deny"
 allow-registry = ["https://github.com/rust-lang/crates.io-index"]
+allow-git = []

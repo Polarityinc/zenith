@@ -84,12 +84,22 @@ pub fn parse_wal_object(bytes: &[u8]) -> ZenResult<(WalHeader, Bytes)> {
     let commit_id = CommitId(p.get_u64_le());
     let fp = SchemaFingerprint(p.get_u128_le());
     let payload_len = p.get_u32_le() as usize;
-    if p.len() < payload_len + 4 {
+    let need = payload_len
+        .checked_add(4)
+        .ok_or_else(|| ZenError::format("WAL payload_len overflow"))?;
+    if p.len() < need {
         return Err(ZenError::format("WAL payload truncated"));
     }
     let payload = p[..payload_len].to_vec();
+    if bytes.len() < 4 {
+        return Err(ZenError::format("WAL CRC field truncated"));
+    }
     let crc_pos = bytes.len() - 4;
-    let stored_crc = u32::from_le_bytes(bytes[crc_pos..].try_into().unwrap());
+    let stored_crc = u32::from_le_bytes(
+        bytes[crc_pos..crc_pos + 4]
+            .try_into()
+            .map_err(|_| ZenError::format("WAL CRC slice"))?,
+    );
     let mut h = Hasher::new();
     h.update(&bytes[..crc_pos]);
     let actual = h.finalize();

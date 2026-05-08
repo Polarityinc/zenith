@@ -24,10 +24,17 @@ nvmeCache:
   size: 200Gi
   storageClass: local-nvme
 
-# Catalog
+# Catalog. NEVER hard-code credentials in values.yaml. Provide them via
+# an external Secret + envFrom, an ESO ExternalSecret, or a SecretStore
+# CSI mount. The default below points at a Secret named `<release>-db`
+# with key `url` (containing the full postgres:// connection string).
 catalog:
   backend: postgres
-  postgresUrl: postgres://zen:zen@postgres:5432/zenith
+  # Empty by default. The deployment template wires
+  # POSTGRES_URL=valueFrom.secretKeyRef so the password never appears
+  # in pod specs, etcd, or `kubectl describe` output.
+  existingSecret: ""        # e.g. "zenith-db" — Secret with key "url"
+  existingSecretKey: "url"
 
 # Object storage
 storage:

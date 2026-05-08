@@ -15,10 +15,11 @@
 //!
 //! Plus the standard OTel span fields (trace_id, span_id, name, status, time).
 
-use axum::{extract::State, http::StatusCode, Json};
+use axum::{extract::State, http::StatusCode, Extension, Json};
 use serde::Deserialize;
 use serde_json::Value;
 
+use zen_auth::Claims;
 use zen_catalog::model::WalObjectRow;
 use zen_common::{CommitId, PartitionId, Schema, SpanId, SpanRecord, TenantId, TraceId};
 use zen_wal::WalWriter;
@@ -87,9 +88,13 @@ pub struct Status {
 
 pub async fn handle_otlp_traces(
     State(state): State<ServerState>,
+    claims: Extension<Claims>,
     Json(req): Json<OtlpExportTraceRequest>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
-    let tenant = TenantId(0); // OTLP doesn't carry tenant; assume default. Header-driven routing in real deploys.
+    // CRITICAL: OTLP previously hard-coded `TenantId(0)`, which would
+    // mix all tenants' OTLP traffic together when JWT auth was on. Pull
+    // the tenant from the verified claim instead.
+    let tenant = TenantId(claims.tenant_id);
     let partition = PartitionId(0);
 
     state

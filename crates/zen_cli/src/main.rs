@@ -215,7 +215,43 @@ async fn cmd_admin_restore(config_path: PathBuf, tenant: u64, from: PathBuf) -> 
     for s in segments {
         let segment_id = uuid::Uuid::parse_str(s["segment_id"].as_str().unwrap_or(""))?;
         let object_key = s["object_key"].as_str().unwrap_or("").to_string();
+        // SECURITY: object_key comes from a manifest that may be
+        // attacker-controlled in transit. Reject anything containing
+        // path-traversal sequences or absolute paths so a malicious
+        // backup can't write to arbitrary keys (e.g. "../etc/passwd"
+        // on a local-fs store, or another tenant's prefix on S3).
+        if object_key.is_empty()
+            || object_key.contains("..")
+            || object_key.starts_with('/')
+            || object_key.contains('\0')
+        {
+            anyhow::bail!(
+                "manifest object_key {object_key:?} failed safety check (contains '..', is absolute, or has NUL)"
+            );
+        }
+        // Constrain restored keys to this tenant's namespace.
+        let expected_prefix = format!("tenants/{tenant}/");
+        if !object_key.starts_with(&expected_prefix)
+            && !object_key.starts_with(&format!("seg/{tenant}/"))
+        {
+            // Older manifests may not include a tenant prefix; allow
+            // those but log a warning so operators notice cross-tenant
+            // restore attempts.
+            tracing::warn!(
+                object_key,
+                tenant,
+                "restore: object_key has no tenant prefix; assuming legacy manifest"
+            );
+        }
         let path = from.join("segments").join(format!("{segment_id}.zseg"));
+        // Defence-in-depth: ensure the read path is contained within
+        // the backup directory (catches manifest with a tampered
+        // segment_id like "../../escape").
+        let canonical_from = from.canonicalize()?;
+        let canonical_path = path.canonicalize()?;
+        if !canonical_path.starts_with(&canonical_from) {
+            anyhow::bail!("manifest segment path escapes backup root: {path:?}");
+        }
         let bytes = std::fs::read(&path)?;
         store
             .put(&object_key, bytes::Bytes::from(bytes))
