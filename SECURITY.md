@@ -19,7 +19,7 @@ Once we reach `1.0`, we will publish a longer support window in this document.
 
 Instead, use one of:
 
-1. **GitHub Private Vulnerability Reporting** — preferred. Use the **Security** tab on the repository or this link: [https://github.com/polarity-cc/zenithdb/security/advisories/new](https://github.com/polarity-cc/zenithdb/security/advisories/new). This keeps the report private and tracked.
+1. **GitHub Private Vulnerability Reporting** — preferred. Use the **Security** tab on the repository or this link: [https://github.com/Polarityinc/zenith/security/advisories/new](https://github.com/Polarityinc/zenith/security/advisories/new). This keeps the report private and tracked.
 2. **Email** — [security@polarity.cc](mailto:security@polarity.cc). For sensitive details, request our PGP key in your first message and we'll send it back before you share specifics.
 
 Please include, to the extent you can:
@@ -37,7 +37,7 @@ You'll receive an acknowledgement within **2 business days**. We aim to provide 
 - We follow **coordinated disclosure**. We'll work with you on a public-disclosure timeline that gives users a reasonable window to upgrade.
 - We'll credit you in the advisory unless you ask to remain anonymous.
 - We do not currently run a paid bug-bounty program.
-- We may request a CVE on your behalf and will publish a [GitHub Security Advisory](https://github.com/polarity-cc/zenithdb/security/advisories) when the fix ships.
+- We may request a CVE on your behalf and will publish a [GitHub Security Advisory](https://github.com/Polarityinc/zenith/security/advisories) when the fix ships.
 
 ## Scope
 
