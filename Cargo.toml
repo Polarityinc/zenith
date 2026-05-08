@@ -95,7 +95,7 @@ prost = "0.13"
 prost-types = "0.13"
 prost-build = "0.13"
 tonic = "0.12"
-tonic-build = "0.12"
+tonic-build = "0.14"
 axum = { version = "0.7", features = ["macros"] }
 tower = { version = "0.5", features = ["full"] }
 tower-http = { version = "0.6", features = ["trace", "cors", "compression-zstd"] }
