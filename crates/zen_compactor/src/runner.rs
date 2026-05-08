@@ -300,9 +300,13 @@ pub async fn compact_full(
         superseded_at: None, created_at: Utc::now(),
     }).await?;
 
-    // Mark old segments superseded.
+    // Mark old segments superseded. Tenant-scoped so a buggy compactor
+    // can't supersede another tenant's segments by passing a UUID it
+    // doesn't own.
     let old_ids: Vec<Uuid> = segs.iter().map(|s| s.segment_id).collect();
-    catalog.mark_segments_superseded(&old_ids, Utc::now()).await?;
+    catalog
+        .mark_segments_superseded(tenant, &old_ids, Utc::now())
+        .await?;
 
     // Mark WALs consumed.
     if !wals.is_empty() {

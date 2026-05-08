@@ -215,11 +215,20 @@ pub fn decode_page(enc: PageEncoding, page: &[u8]) -> Result<ColumnValues<'stati
         }
         PageEncoding::Zstd => {
             let raw = zstd_decompress(page)?;
-            // Decode our own variable-length packing.
-            let (n, mut p) = (
-                u32::from_le_bytes(raw[..4].try_into().unwrap()) as usize,
-                &raw[4..],
-            );
+            if raw.len() < 4 {
+                return Err(ZenError::format("zstd page header truncated"));
+            }
+            let n = u32::from_le_bytes(raw[..4].try_into().unwrap()) as usize;
+            // SECURITY: bound the row count from a network-controlled
+            // segment so a crafted page can't cause an unbounded
+            // `Vec::with_capacity` allocation. Real row groups are
+            // ≤ 16 K rows; 1 M is generous slack.
+            if n > MAX_PAGE_ROWS {
+                return Err(ZenError::format(format!(
+                    "zstd page row count {n} > {MAX_PAGE_ROWS} max"
+                )));
+            }
+            let mut p = &raw[4..];
             let mut out = Vec::with_capacity(n);
             for _ in 0..n {
                 if p.len() < 4 {
@@ -237,8 +246,24 @@ pub fn decode_page(enc: PageEncoding, page: &[u8]) -> Result<ColumnValues<'stati
         }
         PageEncoding::FixedRaw => {
             let mut p = page;
+            if p.remaining() < 4 {
+                return Err(ZenError::format("FixedRaw header truncated"));
+            }
             let n = p.get_u32_le() as usize;
-            if p.len() < n * 16 {
+            // SECURITY: cap row count, and use checked_mul on the
+            // bounds calculation. Without this a crafted u32 close to
+            // u32::MAX wraps when multiplied by 16, the bounds check
+            // passes, and the subsequent slice/copy panics or reads
+            // out-of-bounds.
+            if n > MAX_PAGE_ROWS {
+                return Err(ZenError::format(format!(
+                    "FixedRaw row count {n} > {MAX_PAGE_ROWS} max"
+                )));
+            }
+            let needed = n
+                .checked_mul(16)
+                .ok_or_else(|| ZenError::format("FixedRaw size overflow"))?;
+            if p.len() < needed {
                 return Err(ZenError::format("FixedRaw page truncated"));
             }
             let mut out = Vec::with_capacity(n);
@@ -252,7 +277,15 @@ pub fn decode_page(enc: PageEncoding, page: &[u8]) -> Result<ColumnValues<'stati
         }
         PageEncoding::Raw => {
             let mut p = page;
+            if p.remaining() < 4 {
+                return Err(ZenError::format("Raw header truncated"));
+            }
             let n = p.get_u32_le() as usize;
+            if n > MAX_PAGE_ROWS {
+                return Err(ZenError::format(format!(
+                    "Raw row count {n} > {MAX_PAGE_ROWS} max"
+                )));
+            }
             let mut out = Vec::with_capacity(n);
             for _ in 0..n {
                 if p.remaining() < 4 {
@@ -269,6 +302,12 @@ pub fn decode_page(enc: PageEncoding, page: &[u8]) -> Result<ColumnValues<'stati
         }
     }
 }
+
+/// Maximum row count we'll honour from a page header. Real row groups
+/// cap at 16 K rows; this is generous slack so honest data still fits
+/// while a crafted u32 close to u32::MAX is rejected before any
+/// allocation happens.
+pub(crate) const MAX_PAGE_ROWS: usize = 1_000_000;
 
 /// Decode just one row index from a page, without materializing all rows. Used
 /// by the executor for late materialization.

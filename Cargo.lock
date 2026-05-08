@@ -5783,10 +5783,12 @@ dependencies = [
  "async-trait",
  "base64",
  "chrono",
+ "futures",
  "hmac",
  "jsonwebtoken",
  "moka",
  "parking_lot",
+ "rand_core 0.6.4",
  "reqwest",
  "serde",
  "serde_json",
@@ -5797,6 +5799,7 @@ dependencies = [
  "tracing",
  "xxhash-rust",
  "zen_common",
+ "zeroize",
 ]
 
 [[package]]
@@ -5925,6 +5928,7 @@ dependencies = [
  "tokio",
  "tokio-stream",
  "tracing",
+ "url",
  "uuid",
  "xxhash-rust",
  "zen_auth",

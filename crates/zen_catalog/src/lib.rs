@@ -84,8 +84,13 @@ pub trait Catalog: Send + Sync + 'static {
 
     /// Mark a set of segments as superseded by a tier-2 / tier-N compaction.
     /// Superseded segments are no longer returned by `list_segments_*`.
+    ///
+    /// SECURITY: scoped by `tenant` so a buggy or malicious caller (or
+    /// future endpoint) can't supersede another tenant's segments by
+    /// guessing a segment_id UUID.
     async fn mark_segments_superseded(
         &self,
+        tenant: TenantId,
         segment_ids: &[uuid::Uuid],
         at: DateTime<Utc>,
     ) -> ZenResult<u64>;

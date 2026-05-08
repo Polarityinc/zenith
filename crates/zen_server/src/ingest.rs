@@ -2,9 +2,10 @@
 
 use std::time::Instant;
 
-use axum::{extract::State, http::StatusCode, Json};
+use axum::{extract::State, http::StatusCode, Extension, Json};
 use serde::{Deserialize, Serialize};
 
+use zen_auth::Claims;
 use zen_catalog::model::WalObjectRow;
 use zen_common::{
     CommitId, PartitionId, Schema, SpanId, SpanRecord, TenantId, TraceId,
@@ -12,9 +13,15 @@ use zen_common::{
 use zen_wal::WalWriter;
 
 use crate::metrics::names;
+use crate::middleware::tenant_check::ANONYMOUS_SUB;
 use crate::state::ServerState;
 
+/// Per-request span cap. Defends against allocate-millions-of-rows DoS
+/// when a malicious actor with a valid token sends one giant batch.
+const MAX_SPANS_PER_REQUEST: usize = 100_000;
+
 #[derive(Clone, Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct IngestRequest {
     pub tenant_id: u64,
     #[serde(default)]
@@ -80,10 +87,11 @@ pub struct IngestResponse {
 
 pub async fn handle_ingest(
     State(state): State<ServerState>,
+    claims: Extension<Claims>,
     body: axum::body::Bytes,
 ) -> Result<Json<IngestResponse>, (StatusCode, String)> {
     let started = Instant::now();
-    let result = handle_ingest_inner(state, body).await;
+    let result = handle_ingest_inner(state, claims.0, body).await;
     let elapsed = started.elapsed().as_secs_f64();
     let (status, rows, tenant_label) = match &result {
         Ok(r) => ("ok", r.spans_accepted as u64, String::new()),
@@ -99,6 +107,7 @@ pub async fn handle_ingest(
 
 async fn handle_ingest_inner(
     state: ServerState,
+    claims: Claims,
     body: axum::body::Bytes,
 ) -> Result<Json<IngestResponse>, (StatusCode, String)> {
     // simd-json is 3-4× faster than serde_json for large bodies. The ingest
@@ -114,6 +123,26 @@ async fn handle_ingest_inner(
             format!("ingest body parse: {e}"),
         )
     })?;
+    // CRITICAL: enforce JWT-tenant matches request tenant.
+    if claims.sub != ANONYMOUS_SUB && claims.tenant_id != req.tenant_id {
+        return Err((
+            StatusCode::FORBIDDEN,
+            format!(
+                "tenant mismatch: token authorizes tenant {}, request claims tenant {}",
+                claims.tenant_id, req.tenant_id
+            ),
+        ));
+    }
+    if req.spans.len() > MAX_SPANS_PER_REQUEST {
+        return Err((
+            StatusCode::PAYLOAD_TOO_LARGE,
+            format!(
+                "ingest batch too large: {} spans > {} max per request",
+                req.spans.len(),
+                MAX_SPANS_PER_REQUEST
+            ),
+        ));
+    }
     let tenant = TenantId(req.tenant_id);
     let partition = PartitionId(req.partition_id);
     state

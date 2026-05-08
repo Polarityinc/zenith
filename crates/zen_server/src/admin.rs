@@ -1,14 +1,44 @@
 //! Admin endpoints: compact, list segments, health.
 
-use axum::{extract::State, http::StatusCode, Json};
+use axum::{extract::State, http::StatusCode, Extension, Json};
 use serde::{Deserialize, Serialize};
 
+use zen_auth::Claims;
 use zen_common::{PartitionId, Schema, TenantId};
 use zen_compactor::{compact_full, compact_partition};
 
+use crate::middleware::tenant_check::ANONYMOUS_SUB;
 use crate::state::ServerState;
 
+fn enforce_tenant(claims: &Claims, claimed: u64) -> Result<(), (StatusCode, String)> {
+    if claims.sub != ANONYMOUS_SUB && claims.tenant_id != claimed {
+        return Err((
+            StatusCode::FORBIDDEN,
+            format!(
+                "tenant mismatch: token authorizes tenant {}, request claims tenant {}",
+                claims.tenant_id, claimed
+            ),
+        ));
+    }
+    Ok(())
+}
+
+fn require_admin_scope(claims: &Claims) -> Result<(), (StatusCode, String)> {
+    // Anonymous (auth-off) keeps full scope; real claims must include
+    // an explicit `admin` scope. compact / compact-full are expensive
+    // and shouldn't be runnable from a read-only token.
+    if claims.sub == ANONYMOUS_SUB || claims.has_scope("admin") {
+        Ok(())
+    } else {
+        Err((
+            StatusCode::FORBIDDEN,
+            "admin scope required for this operation".into(),
+        ))
+    }
+}
+
 #[derive(Clone, Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct CompactRequest {
     pub tenant_id: u64,
     #[serde(default)]
@@ -25,8 +55,11 @@ pub struct CompactResponse {
 
 pub async fn handle_compact(
     State(state): State<ServerState>,
+    claims: Extension<Claims>,
     Json(req): Json<CompactRequest>,
 ) -> Result<Json<CompactResponse>, (StatusCode, String)> {
+    enforce_tenant(&claims, req.tenant_id)?;
+    require_admin_scope(&claims)?;
     let tenant = TenantId(req.tenant_id);
     let partition = PartitionId(req.partition_id);
     let stats = compact_partition(
@@ -49,8 +82,11 @@ pub async fn handle_compact(
 
 pub async fn handle_compact_full(
     State(state): State<ServerState>,
+    claims: Extension<Claims>,
     Json(req): Json<CompactRequest>,
 ) -> Result<Json<CompactResponse>, (StatusCode, String)> {
+    enforce_tenant(&claims, req.tenant_id)?;
+    require_admin_scope(&claims)?;
     let tenant = TenantId(req.tenant_id);
     let partition = PartitionId(req.partition_id);
     let stats = compact_full(
@@ -114,8 +150,10 @@ pub async fn handle_readyz(
 
 pub async fn handle_segments(
     State(state): State<ServerState>,
+    claims: Extension<Claims>,
     axum::extract::Query(q): axum::extract::Query<SegmentsQuery>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+    enforce_tenant(&claims, q.tenant_id)?;
     let segs = state
         .catalog
         .list_segments_for_tenant(TenantId(q.tenant_id))

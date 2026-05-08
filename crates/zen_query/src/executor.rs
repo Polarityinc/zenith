@@ -18,6 +18,18 @@
 // the durability_bench comparison. Keeping the suppression localized.
 #![allow(clippy::needless_range_loop)]
 
+/// Hard upper bound for any user-supplied LIMIT. A query like
+/// `SELECT * FROM spans LIMIT 1_000_000_000` would otherwise tie up
+/// the executor scanning all segments before it could even check the
+/// LIMIT — a trivial DoS for any tenant. Honest queries fit well
+/// inside this; analytical paging should use OFFSET-style cursors.
+pub const MAX_QUERY_LIMIT: u32 = 100_000;
+
+/// Clamp a parsed LIMIT to [`MAX_QUERY_LIMIT`].
+fn clamp_limit(limit: Option<u32>) -> Option<u32> {
+    limit.map(|l| l.min(MAX_QUERY_LIMIT))
+}
+
 use std::sync::Arc;
 use std::time::Instant;
 
@@ -66,6 +78,12 @@ pub async fn execute_full(
     seg_cache: &SegmentCache,
     list_cache: &SegmentListCache,
 ) -> ZenResult<ResultSet> {
+    // SECURITY: clamp the parsed LIMIT before any scan kicks off so a
+    // request with `LIMIT 999_999_999` (or none at all on a wide
+    // SELECT) can't DoS the executor.
+    let mut plan = plan.clone();
+    plan.limit = clamp_limit(plan.limit);
+    let plan = &plan;
     // Fast path: pure GROUP BY + COUNT(*), no ORDER BY. Bypass ResultRow
     // construction and operate directly on the dict-encoded group_by columns.
     if !plan.aggregates.is_empty()
@@ -879,7 +897,16 @@ fn eval_compare(
     );
     let (left, right) = match expr {
         Expr::Lt(a, b) | Expr::Le(a, b) | Expr::Gt(a, b) | Expr::Ge(a, b) | Expr::Ne(a, b) => (a, b),
-        _ => unreachable!(),
+        // Defensive: every variant the precondition matches against
+        // is enumerated above. If a future Expr variant slips through
+        // the precondition check, return a structured error rather
+        // than panicking — a panic on user-supplied query input is a
+        // DoS.
+        other => {
+            return Err(ZenError::query(format!(
+                "comparison helper called with non-comparison expression: {other:?}"
+            )));
+        }
     };
     if let (Expr::Column(c), Expr::Literal(Literal::Int(v))) = (left.as_ref(), right.as_ref()) {
         let i = col_idx(c).ok_or_else(|| ZenError::query(format!("column {c} not found")))?;

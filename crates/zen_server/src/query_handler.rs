@@ -4,17 +4,20 @@
 
 use std::time::Instant;
 
-use axum::{extract::State, http::StatusCode, Json};
+use axum::{extract::State, http::StatusCode, Extension, Json};
 use serde::{Deserialize, Serialize};
 
+use zen_auth::Claims;
 use zen_cluster::remote::InternalQueryRequest;
 use zen_cluster::{QueryRouter, RouteDecision, ShardKey};
 use zen_query::{execute_full, ResultSet};
 
 use crate::metrics::names;
+use crate::middleware::tenant_check::ANONYMOUS_SUB;
 use crate::state::ServerState;
 
 #[derive(Clone, Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct QueryRequest {
     pub tenant_id: u64,
     pub query: String,
@@ -34,8 +37,22 @@ pub struct QueryResponse {
 
 pub async fn handle_query(
     State(state): State<ServerState>,
+    claims: Extension<Claims>,
     Json(req): Json<QueryRequest>,
 ) -> Result<Json<QueryResponse>, (StatusCode, String)> {
+    // CRITICAL: enforce that the JWT-verified tenant matches the
+    // request body. Without this, a tenant with a valid token could
+    // submit `{"tenant_id": <other>}` and read/write any other
+    // tenant's data — the worst class of multi-tenant bug.
+    if claims.sub != ANONYMOUS_SUB && claims.tenant_id != req.tenant_id {
+        return Err((
+            StatusCode::FORBIDDEN,
+            format!(
+                "tenant mismatch: token authorizes tenant {}, request claims tenant {}",
+                claims.tenant_id, req.tenant_id
+            ),
+        ));
+    }
     let started = Instant::now();
     let tenant_label = req.tenant_id.to_string();
     let result = handle_query_inner(state, req).await;

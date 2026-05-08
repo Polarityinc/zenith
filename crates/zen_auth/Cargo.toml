@@ -23,3 +23,6 @@ tracing = { workspace = true }
 reqwest = { workspace = true }
 tokio = { workspace = true }
 async-trait = { workspace = true }
+zeroize = { version = "1.7", features = ["zeroize_derive"] }
+rand_core = { workspace = true }
+futures = { workspace = true }

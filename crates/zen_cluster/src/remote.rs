@@ -131,6 +131,17 @@ impl RemoteClient {
         endpoint: &str,
         req: &InternalQueryRequest,
     ) -> Result<ResultSet, RemoteError> {
+        // SECURITY: defend against SSRF via a malicious node entry in
+        // the cluster registry. A registered peer endpoint that points
+        // at link-local metadata services (e.g. AWS 169.254.169.254)
+        // could be used to exfiltrate IAM credentials when this
+        // coordinator forwards a query. Reject obviously dangerous
+        // hosts before issuing the request.
+        if !is_endpoint_allowed(endpoint) {
+            return Err(RemoteError::Transport(format!(
+                "endpoint blocked: {endpoint} resolves to a forbidden host"
+            )));
+        }
         let url = format!("{}/v1/internal/query", endpoint.trim_end_matches('/'));
         // Pre-serialize the body so we can both sign it and ship it.
         // Doing this once avoids re-encoding inside `reqwest`.
@@ -138,7 +149,9 @@ impl RemoteClient {
         let mut builder = self.http.post(&url).header("content-type", "application/json");
         if let Some(signer) = &self.signer {
             let ts = chrono::Utc::now().timestamp();
-            let sig = signer.sign("POST", "/v1/internal/query", &body, ts);
+            let sig = signer
+                .sign("POST", "/v1/internal/query", &body, ts)
+                .map_err(|e| RemoteError::Transport(format!("hmac sign: {e}")))?;
             builder = builder
                 .header("X-Zen-Hmac", sig)
                 .header("X-Zen-Timestamp", ts.to_string());
@@ -161,6 +174,85 @@ impl RemoteClient {
             .await
             .map_err(|e| RemoteError::Decode(format!("{e}")))?;
         Ok(parsed.result)
+    }
+}
+
+/// Vet a registered peer endpoint before forwarding a query to it. The
+/// goal is to block the most common SSRF pivots in cloud environments
+/// — link-local metadata (169.254.169.254 / fd00:ec2::254) and any
+/// hostname the operator probably didn't intend.
+///
+/// We DO allow `localhost` / `127.0.0.1` and 10.x / 172.16-31.x /
+/// 192.168.x because legitimate clusters live on those ranges. The
+/// strictest defence would be "reject all RFC1918 outside an explicit
+/// allowlist", but that breaks the common single-VPC deployment. The
+/// IdP-style fix (only fetch over HTTPS to allowed hosts) is wired
+/// upstream in JWKS; here we focus on blocking known exfiltration
+/// targets.
+fn is_endpoint_allowed(endpoint: &str) -> bool {
+    let parsed = match url::Url::parse(endpoint) {
+        Ok(u) => u,
+        Err(_) => return false,
+    };
+    // Only http(s) — `file://`, `gopher://` etc. would defeat the
+    // intent of "make an HTTP call to a peer".
+    let scheme = parsed.scheme();
+    if scheme != "http" && scheme != "https" {
+        return false;
+    }
+    let host = match parsed.host_str() {
+        Some(h) => h,
+        None => return false,
+    };
+    // Block IMDS hosts explicitly. Cover the AWS / GCP / Azure
+    // canonical addresses + IPv6 link-local.
+    const BLOCKED_HOSTS: &[&str] = &[
+        "169.254.169.254",
+        "metadata.google.internal",
+        "metadata",
+        "fd00:ec2::254",
+        "fe80::a9fe:a9fe",
+    ];
+    if BLOCKED_HOSTS.contains(&host) {
+        return false;
+    }
+    // Block any host literal-IP starting with 169.254.* or fe80:: (link-local).
+    if host.starts_with("169.254.") {
+        return false;
+    }
+    if host.starts_with("fe80:") || host.starts_with("[fe80:") {
+        return false;
+    }
+    true
+}
+
+#[cfg(test)]
+mod endpoint_tests {
+    use super::*;
+
+    #[test]
+    fn allows_loopback() {
+        assert!(is_endpoint_allowed("http://127.0.0.1:8080"));
+        assert!(is_endpoint_allowed("http://localhost:9000"));
+    }
+
+    #[test]
+    fn allows_rfc1918() {
+        assert!(is_endpoint_allowed("https://10.0.0.5:8080"));
+        assert!(is_endpoint_allowed("https://192.168.1.1:8080"));
+    }
+
+    #[test]
+    fn blocks_imds() {
+        assert!(!is_endpoint_allowed("http://169.254.169.254/latest/meta-data/"));
+        assert!(!is_endpoint_allowed("http://metadata.google.internal"));
+        assert!(!is_endpoint_allowed("http://[fe80::1]:80"));
+    }
+
+    #[test]
+    fn blocks_non_http_schemes() {
+        assert!(!is_endpoint_allowed("file:///etc/passwd"));
+        assert!(!is_endpoint_allowed("ftp://attacker"));
     }
 }
 

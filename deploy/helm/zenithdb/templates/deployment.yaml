@@ -14,10 +14,27 @@ spec:
       labels:
         app.kubernetes.io/name: zenithdb
     spec:
+      serviceAccountName: {{ .Values.serviceAccount.name | default .Release.Name }}
+      automountServiceAccountToken: {{ .Values.serviceAccount.automountToken }}
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65532
+        runAsGroup: 65532
+        fsGroup: 65532
+        seccompProfile:
+          type: RuntimeDefault
       containers:
         - name: zenithdb
           image: "{{ .Values.image.repository }}:{{ .Values.image.tag }}"
           imagePullPolicy: {{ .Values.image.pullPolicy }}
+          securityContext:
+            runAsNonRoot: true
+            runAsUser: 65532
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop:
+                - ALL
           ports:
             - name: http
               containerPort: 8080
@@ -25,11 +42,16 @@ spec:
               containerPort: 50051
           env:
             - name: ZEN_CATALOG_BACKEND
-              value: {{ .Values.catalog.backend }}
+              value: {{ .Values.catalog.backend | quote }}
+            {{- if .Values.catalog.existingSecret }}
             - name: ZEN_POSTGRES_URL
-              value: {{ .Values.catalog.postgresUrl }}
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.catalog.existingSecret }}
+                  key: {{ .Values.catalog.existingSecretKey | default "url" }}
+            {{- end }}
             - name: ZEN_STORAGE_BACKEND
-              value: {{ .Values.storage.backend }}
+              value: {{ .Values.storage.backend | quote }}
           resources:
             {{- toYaml .Values.resources | nindent 12 }}
           {{- if .Values.nvmeCache.enabled }}

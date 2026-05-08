@@ -33,6 +33,11 @@ pub trait RootKey: Send + Sync {
 /// On-disk static root key. Read from `cfg.crypto.root_key_path` at boot.
 /// Suitable for single-node and small clusters; not suitable for
 /// regulated workloads where the master key must be HSM-backed.
+///
+/// `Zeroize` + `ZeroizeOnDrop` ensure the master key bytes are wiped
+/// from RAM when the value is dropped — defends core dumps and
+/// memory-snapshot tools from leaking the key after server shutdown.
+#[derive(Zeroize, ZeroizeOnDrop)]
 pub struct StaticRootKey {
     inner: [u8; 32],
 }

@@ -200,7 +200,21 @@ fn arg_col_and_float(args: &FunctionArguments) -> (Option<String>, Option<f64>) 
     (col, q)
 }
 
+/// Maximum recursion depth for `parse_expr`. Hard cap to prevent
+/// stack overflow on adversarial nested expressions like
+/// `((((((... a OR b))))))`. Real queries fit in <20 levels.
+const MAX_EXPR_DEPTH: u32 = 64;
+
 fn parse_expr(e: &SqlExpr) -> Result<Expr, ZenError> {
+    parse_expr_rec(e, 0)
+}
+
+fn parse_expr_rec(e: &SqlExpr, depth: u32) -> Result<Expr, ZenError> {
+    if depth > MAX_EXPR_DEPTH {
+        return Err(ZenError::query(format!(
+            "expression too deeply nested (>{MAX_EXPR_DEPTH} levels) — possible adversarial input"
+        )));
+    }
     match e {
         SqlExpr::Identifier(id) => Ok(Expr::col(id.value.clone())),
         SqlExpr::CompoundIdentifier(parts) => {
@@ -230,8 +244,8 @@ fn parse_expr(e: &SqlExpr) -> Result<Expr, ZenError> {
             other => Err(ZenError::query(format!("unsupported literal: {other:?}"))),
         },
         SqlExpr::BinaryOp { left, op, right } => {
-            let l = parse_expr(left)?;
-            let r = parse_expr(right)?;
+            let l = parse_expr_rec(left, depth + 1)?;
+            let r = parse_expr_rec(right, depth + 1)?;
             // Metadata-prefix → JsonPathEq if both sides match.
             if let (Expr::Column(c), Expr::Literal(Literal::String(v))) = (&l, &r) {
                 if c.contains('.') && c.starts_with("metadata.") && matches!(op, BinaryOperator::Eq) {
@@ -257,7 +271,7 @@ fn parse_expr(e: &SqlExpr) -> Result<Expr, ZenError> {
         SqlExpr::UnaryOp {
             op: sqlparser::ast::UnaryOperator::Not,
             expr,
-        } => Ok(Expr::Not(Box::new(parse_expr(expr)?))),
+        } => Ok(Expr::Not(Box::new(parse_expr_rec(expr, depth + 1)?))),
         SqlExpr::Function(f) => {
             let name = f.name.to_string();
             let name_lower = name.to_lowercase();

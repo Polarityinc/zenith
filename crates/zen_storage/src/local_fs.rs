@@ -57,6 +57,26 @@ impl LocalFsStore {
         // Keys can contain '/'; we mirror them into the filesystem.
         self.root.join(key.trim_start_matches('/'))
     }
+
+    /// Validate a key for write operations. Rejects path-traversal
+    /// sequences, NUL bytes, and absolute components so an attacker
+    /// who reaches the BlobStore API can't escape `root`.
+    fn validate_key_for_write(key: &str) -> ZenResult<()> {
+        if key.is_empty() {
+            return Err(ZenError::storage("blob key must not be empty"));
+        }
+        if key.as_bytes().contains(&0) {
+            return Err(ZenError::storage("blob key contains NUL byte"));
+        }
+        for component in key.split('/') {
+            if component == ".." {
+                return Err(ZenError::storage(format!(
+                    "blob key {key:?} contains path-traversal '..'"
+                )));
+            }
+        }
+        Ok(())
+    }
 }
 
 /// Default durability policy: ON unless `ZEN_UNSAFE_FAST=1` is explicitly
@@ -96,6 +116,7 @@ impl BlobStore for LocalFsStore {
     }
 
     async fn put(&self, key: &str, bytes: Bytes) -> ZenResult<()> {
+        Self::validate_key_for_write(key)?;
         let p = self.path_for(key);
         if let Some(parent) = p.parent() {
             fs::create_dir_all(parent)
@@ -138,6 +159,7 @@ impl BlobStore for LocalFsStore {
     }
 
     async fn put_if_absent(&self, key: &str, bytes: Bytes) -> ZenResult<bool> {
+        Self::validate_key_for_write(key)?;
         let p = self.path_for(key);
         if let Some(parent) = p.parent() {
             fs::create_dir_all(parent)

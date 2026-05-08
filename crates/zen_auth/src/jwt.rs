@@ -206,6 +206,14 @@ impl JwtVerifier {
     }
 
     async fn refresh_jwks(&self, url: &str) -> Result<(), JwtError> {
+        // SECURITY: JWKS must come over HTTPS — over plain HTTP a MITM
+        // can swap in attacker-controlled keys and forge any JWT. The
+        // only exception is `http://localhost` for in-process tests.
+        if !url.starts_with("https://") && !url.starts_with("http://localhost") && !url.starts_with("http://127.0.0.1") {
+            return Err(JwtError::JwksFetch(format!(
+                "JWKS URL must use https:// (got: {url})"
+            )));
+        }
         let resp = self
             .inner
             .http
@@ -213,12 +221,33 @@ impl JwtVerifier {
             .send()
             .await
             .map_err(|e| JwtError::JwksFetch(format!("{e}")))?;
-        let bytes = resp
-            .bytes()
-            .await
-            .map_err(|e| JwtError::JwksFetch(format!("{e}")))?;
+        // SECURITY: bound the JWKS response so a malicious or
+        // compromised IdP can't OOM us with a multi-GB document.
+        // Real JWKS docs are ≤ a few KB; 1 MiB is generous.
+        const MAX_JWKS_BYTES: usize = 1024 * 1024;
+        if let Some(len) = resp.content_length() {
+            if len as usize > MAX_JWKS_BYTES {
+                return Err(JwtError::JwksFetch(format!(
+                    "JWKS response too large: {len} bytes > {MAX_JWKS_BYTES} max"
+                )));
+            }
+        }
+        // Even if Content-Length is absent or lying, cap the in-flight
+        // accumulation. We collect chunks until we exceed the cap.
+        use futures::StreamExt;
+        let mut stream = resp.bytes_stream();
+        let mut buf: Vec<u8> = Vec::new();
+        while let Some(chunk) = stream.next().await {
+            let chunk = chunk.map_err(|e| JwtError::JwksFetch(format!("stream: {e}")))?;
+            if buf.len() + chunk.len() > MAX_JWKS_BYTES {
+                return Err(JwtError::JwksFetch(format!(
+                    "JWKS exceeded {MAX_JWKS_BYTES} byte cap mid-stream"
+                )));
+            }
+            buf.extend_from_slice(&chunk);
+        }
         let jwks: JwkSet =
-            serde_json::from_slice(&bytes).map_err(|e| JwtError::JwksParse(format!("{e}")))?;
+            serde_json::from_slice(&buf).map_err(|e| JwtError::JwksParse(format!("{e}")))?;
         let mut by_kid = HashMap::new();
         for jwk in jwks.keys.iter() {
             if let (Some(kid), Ok(key)) = (
