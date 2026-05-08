@@ -20,7 +20,7 @@ Once we reach `1.0`, we will publish a longer support window in this document.
 Instead, use one of:
 
 1. **GitHub Private Vulnerability Reporting** — preferred. Use the **Security** tab on the repository or this link: [https://github.com/Polarityinc/zenith/security/advisories/new](https://github.com/Polarityinc/zenith/security/advisories/new). This keeps the report private and tracked.
-2. **Email** — [security@polarity.cc](mailto:security@polarity.cc). For sensitive details, request our PGP key in your first message and we'll send it back before you share specifics.
+2. **Email** — [security@polarity.so](mailto:security@polarity.so). For sensitive details, request our PGP key in your first message and we'll send it back before you share specifics.
 
 Please include, to the extent you can:
 
