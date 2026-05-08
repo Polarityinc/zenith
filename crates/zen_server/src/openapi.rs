@@ -34,7 +34,7 @@ fn build_spec() -> utoipa::openapi::OpenApi {
         .contact(Some(
             ContactBuilder::new()
                 .name(Some("Polarity"))
-                .email(Some("support@polarity.cc"))
+                .email(Some("support@polarity.so"))
                 .build(),
         ))
         .build();
