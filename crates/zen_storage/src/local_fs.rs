@@ -337,8 +337,14 @@ mod tests {
     async fn put_if_absent_no_overwrite() {
         let dir = TempDir::new().unwrap();
         let s = LocalFsStore::new(dir.path()).unwrap();
-        let ok1 = s.put_if_absent("k", Bytes::from_static(b"first")).await.unwrap();
-        let ok2 = s.put_if_absent("k", Bytes::from_static(b"second")).await.unwrap();
+        let ok1 = s
+            .put_if_absent("k", Bytes::from_static(b"first"))
+            .await
+            .unwrap();
+        let ok2 = s
+            .put_if_absent("k", Bytes::from_static(b"second"))
+            .await
+            .unwrap();
         assert!(ok1);
         assert!(!ok2);
         let r = s.get("k").await.unwrap();
@@ -373,8 +379,14 @@ mod tests {
         s.put("k", Bytes::from_static(b"hello")).await.unwrap();
         assert_eq!(&s.get("k").await.unwrap()[..], b"hello");
         assert_eq!(&s.get_range("k", 1..4).await.unwrap()[..], b"ell");
-        assert!(!s.put_if_absent("k", Bytes::from_static(b"x")).await.unwrap());
-        assert!(s.put_if_absent("k2", Bytes::from_static(b"y")).await.unwrap());
+        assert!(!s
+            .put_if_absent("k", Bytes::from_static(b"x"))
+            .await
+            .unwrap());
+        assert!(s
+            .put_if_absent("k2", Bytes::from_static(b"y"))
+            .await
+            .unwrap());
         let mut keys = s.list("").await.unwrap();
         keys.sort();
         assert_eq!(keys, vec!["k".to_string(), "k2".to_string()]);

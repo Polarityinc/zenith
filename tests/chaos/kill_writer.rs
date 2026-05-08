@@ -87,10 +87,7 @@ async fn wal_durable_then_compact_recovers_rows() {
     .await
     .unwrap();
     assert_eq!(stats.rows_compacted, 12, "expected all 12 rows recovered");
-    let segs = catalog
-        .list_segments_for_tenant(TenantId(1))
-        .await
-        .unwrap();
+    let segs = catalog.list_segments_for_tenant(TenantId(1)).await.unwrap();
     assert!(!segs.is_empty(), "compactor should have produced a segment");
     let total_rows: i64 = segs.iter().map(|s| s.row_count).sum();
     assert_eq!(total_rows, 12);

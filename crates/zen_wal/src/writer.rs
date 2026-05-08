@@ -41,10 +41,7 @@ impl WalWriter {
         let object_bytes = build_wal_object(header, payload_zstd)?;
         let key = WalObjectKey::new(tenant, partition, commit_id);
         let path = key.to_string();
-        let ok = self
-            .store
-            .put_if_absent(&path, object_bytes)
-            .await?;
+        let ok = self.store.put_if_absent(&path, object_bytes).await?;
         if !ok {
             return Err(ZenError::conflict(format!("wal object exists: {path}")));
         }

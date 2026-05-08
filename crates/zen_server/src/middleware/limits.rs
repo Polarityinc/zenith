@@ -20,11 +20,7 @@ use std::sync::Arc;
 
 use axum::{extract::Request, http::StatusCode, middleware::Next, response::Response};
 use dashmap::DashMap;
-use governor::{
-    clock::DefaultClock,
-    state::keyed::DefaultKeyedStateStore,
-    Quota, RateLimiter,
-};
+use governor::{clock::DefaultClock, state::keyed::DefaultKeyedStateStore, Quota, RateLimiter};
 
 use zen_auth::Claims;
 
@@ -69,7 +65,10 @@ impl RateLimits {
         }
         match self.inner.limiter.check_key(&tenant_id) {
             Ok(_) => Ok(()),
-            Err(neg) => Err(neg.wait_time_from(self.inner.limiter.clock_now()).as_secs().max(1)),
+            Err(neg) => Err(neg
+                .wait_time_from(self.inner.limiter.clock_now())
+                .as_secs()
+                .max(1)),
         }
     }
 }

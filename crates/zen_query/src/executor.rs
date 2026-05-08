@@ -47,6 +47,23 @@ use crate::row::{ResultRow, ResultSet, ResultStats};
 use crate::segment_cache::{SegmentCache, SegmentExtras};
 use crate::segment_list_cache::SegmentListCache;
 
+#[inline]
+fn full_row_bitmap(row_count: usize) -> RoaringBitmap {
+    let mut bm = RoaringBitmap::new();
+    if row_count > 0 {
+        bm.insert_range(0..row_count as u32);
+    }
+    bm
+}
+
+#[inline]
+fn can_stop_after_limit(plan: &LogicalPlan) -> bool {
+    plan.limit.is_some()
+        && plan.aggregates.is_empty()
+        && plan.order_by.is_none()
+        && plan.group_by.is_empty()
+}
+
 pub async fn execute(
     plan: &LogicalPlan,
     catalog: Arc<dyn Catalog>,
@@ -100,7 +117,9 @@ pub async fn execute_full(
     let mut stats = ResultStats::default();
 
     let tenant = TenantId(plan.tenant_id);
-    let mut all_rows: Vec<ResultRow> = Vec::new();
+    let stop_after_limit = can_stop_after_limit(plan);
+    let limit_rows = plan.limit.map(|l| l as usize);
+    let mut all_rows: Vec<ResultRow> = Vec::with_capacity(limit_rows.unwrap_or_default().min(1024));
 
     // Extract a literal `trace_id = '...'` filter for segment-level pruning.
     let trace_id_filter: Option<[u8; 16]> = plan
@@ -133,7 +152,27 @@ pub async fn execute_full(
         };
         stats.segments_scanned += segments.len() as u32;
 
-        if segments.len() <= 1 {
+        if stop_after_limit {
+            for seg in segments.iter() {
+                let remaining = limit_rows.map(|l| l.saturating_sub(all_rows.len()));
+                if remaining == Some(0) {
+                    break;
+                }
+                scan_one_segment(
+                    seg,
+                    store.clone(),
+                    seg_cache,
+                    plan,
+                    &mut all_rows,
+                    &mut stats,
+                    remaining,
+                )
+                .await?;
+                if limit_rows.is_some_and(|l| all_rows.len() >= l) {
+                    break;
+                }
+            }
+        } else if segments.len() <= 1 {
             for seg in segments.iter() {
                 scan_one_segment(
                     seg,
@@ -142,6 +181,7 @@ pub async fn execute_full(
                     plan,
                     &mut all_rows,
                     &mut stats,
+                    None,
                 )
                 .await?;
             }
@@ -163,9 +203,11 @@ pub async fn execute_full(
                         async move {
                             let mut rows: Vec<ResultRow> = Vec::new();
                             let mut s = ResultStats::default();
-                            scan_one_segment(&seg, store, &seg_cache, &plan, &mut rows, &mut s)
-                                .await
-                                .map(|()| (rows, s))
+                            scan_one_segment(
+                                &seg, store, &seg_cache, &plan, &mut rows, &mut s, None,
+                            )
+                            .await
+                            .map(|()| (rows, s))
                         }
                     })
                     .buffer_unordered(MAX_IN_FLIGHT)
@@ -183,16 +225,21 @@ pub async fn execute_full(
         // Sync write visibility: scan unconsumed WAL files in the same
         // partition. Pure WALs are small (cap at flush_max_bytes per object).
         // We only scan if there's no expensive filtering they can't support.
-        let wal_rows = scan_unconsumed_wals(
-            &catalog,
-            store.clone(),
-            tenant,
-            PartitionId(p),
-            plan,
-            trace_id_filter,
-        )
-        .await?;
-        all_rows.extend(wal_rows);
+        if !limit_rows.is_some_and(|l| stop_after_limit && all_rows.len() >= l) {
+            let wal_rows = scan_unconsumed_wals(
+                &catalog,
+                store.clone(),
+                tenant,
+                PartitionId(p),
+                plan,
+                trace_id_filter,
+            )
+            .await?;
+            all_rows.extend(wal_rows);
+        }
+        if limit_rows.is_some_and(|l| stop_after_limit && all_rows.len() >= l) {
+            break;
+        }
     }
 
     // ORDER BY (string or numeric).
@@ -263,10 +310,33 @@ async fn scan_one_segment(
     plan: &LogicalPlan,
     out: &mut Vec<ResultRow>,
     stats: &mut ResultStats,
+    max_rows: Option<usize>,
 ) -> ZenResult<()> {
     let extras = seg_cache.get_or_load(&seg.object_key, store).await?;
     let reader = extras.reader.clone();
     let n_rgs = reader.row_group_count();
+
+    if let Some(max_rows) = max_rows {
+        let start_len = out.len();
+        for rg_idx in 0..n_rgs {
+            let emitted = out.len().saturating_sub(start_len);
+            let remaining = max_rows.saturating_sub(emitted);
+            if remaining == 0 {
+                break;
+            }
+            let mut rg_plan = plan.clone();
+            rg_plan.limit = Some(remaining.min(MAX_QUERY_LIMIT as usize) as u32);
+            let res = scan_row_group(&extras, rg_idx, &rg_plan)?;
+            out.extend(res.rows);
+            stats.row_groups_pruned += res.pruned;
+            stats.row_groups_scanned += res.scanned;
+            stats.bytes_decoded_wide += res.bytes_decoded_wide;
+            if out.len().saturating_sub(start_len) >= max_rows {
+                break;
+            }
+        }
+        return Ok(());
+    }
 
     if n_rgs <= 1 {
         for rg_idx in 0..n_rgs {
@@ -353,10 +423,7 @@ fn scan_row_group(
         }
     }
 
-    let mut mask = RoaringBitmap::new();
-    for r in 0..row_count {
-        mask.insert(r as u32);
-    }
+    let mut mask = full_row_bitmap(row_count);
     if let Some(expr) = predicate {
         let bm = eval_predicate(extras, &col_idx, rg_idx, expr, row_count)?;
         mask &= bm;
@@ -445,10 +512,7 @@ fn materialize_rows_minimal(
     let mut views: Vec<(String, PageView<'_>)> = Vec::new();
     for c in cols {
         if let Some(i) = col_idx(c) {
-            if reader.row_groups[rg_idx]
-                .descriptor_for_column(i)
-                .is_some()
-            {
+            if reader.row_groups[rg_idx].descriptor_for_column(i).is_some() {
                 views.push((c.clone(), reader.open_page(rg_idx, i)?));
             }
         }
@@ -457,7 +521,9 @@ fn materialize_rows_minimal(
     for (col_name, view) in &views {
         for (i, &r) in rows.iter().enumerate() {
             let v = view.row(r)?;
-            new_rows[i].fields.insert(col_name.clone(), row_value_to_json(v));
+            new_rows[i]
+                .fields
+                .insert(col_name.clone(), row_value_to_json(v));
         }
     }
     out.extend(new_rows);
@@ -507,20 +573,28 @@ async fn execute_count_aggregate(
         };
         stats.segments_scanned += segments.len() as u32;
 
-        // Spawn per-segment, merge into local map.
-        use futures::future::join_all;
+        // Bounded per-segment aggregation. At 1 TB+ a partition can contain
+        // thousands of segments; spawning all of them at once adds avoidable
+        // memory pressure and can overwhelm object storage.
+        use futures::stream::{self, StreamExt};
+        const MAX_IN_FLIGHT: usize = 64;
         let plan_clone = plan.clone();
-        let mut futs = Vec::with_capacity(segments.len());
-        for seg in segments.iter() {
-            let seg = seg.clone();
-            let store = store.clone();
-            let seg_cache = seg_cache.clone();
-            let plan = plan_clone.clone();
-            futs.push(async move {
-                count_one_segment(&seg, store, &seg_cache, &plan).await
-            });
-        }
-        for r in join_all(futs).await {
+        let store_clone = store.clone();
+        let seg_cache_clone = seg_cache.clone();
+        // Alias the per-segment count payload so clippy doesn't flag the
+        // collected Vec as a "very complex type".
+        type SegCount = (ahash::AHashMap<Vec<String>, i64>, ResultStats);
+        let results: Vec<ZenResult<SegCount>> = stream::iter(segments.into_iter())
+            .map(|seg| {
+                let store = store_clone.clone();
+                let seg_cache = seg_cache_clone.clone();
+                let plan = plan_clone.clone();
+                async move { count_one_segment(&seg, store, &seg_cache, &plan).await }
+            })
+            .buffer_unordered(MAX_IN_FLIGHT)
+            .collect()
+            .await;
+        for r in results {
             let (m, s) = r?;
             stats.row_groups_pruned += s.row_groups_pruned;
             stats.row_groups_scanned += s.row_groups_scanned;
@@ -604,8 +678,7 @@ async fn count_one_segment(
 
     // ahash is significantly faster than the default SipHash for the small,
     // numeric or short-string keys we hit in aggregations (3-5× hash throughput).
-    let mut counts: ahash::AHashMap<Vec<String>, i64> =
-        ahash::AHashMap::with_capacity(64);
+    let mut counts: ahash::AHashMap<Vec<String>, i64> = ahash::AHashMap::with_capacity(64);
     let mut stats = ResultStats::default();
 
     for rg_idx in 0..reader.row_group_count() {
@@ -629,10 +702,7 @@ async fn count_one_segment(
         }
 
         // Compute mask.
-        let mut mask = RoaringBitmap::new();
-        for r in 0..row_count {
-            mask.insert(r as u32);
-        }
+        let mut mask = full_row_bitmap(row_count);
         if let Some(expr) = predicate {
             let bm = eval_predicate(&extras, &col_idx, rg_idx, expr, row_count)?;
             mask &= bm;
@@ -649,11 +719,7 @@ async fn count_one_segment(
             continue;
         }
 
-        let cols: Vec<u32> = plan
-            .group_by
-            .iter()
-            .filter_map(|c| col_idx(c))
-            .collect();
+        let cols: Vec<u32> = plan.group_by.iter().filter_map(|c| col_idx(c)).collect();
         if cols.len() != plan.group_by.len() {
             return Err(zen_common::ZenError::query("group_by column missing"));
         }
@@ -707,17 +773,78 @@ async fn count_one_segment(
 /// Walk the predicate tree looking for an `Eq(Column("trace_id"), Literal::String(ulid))`
 /// at any conjunction position. Returns the 16-byte trace_id if found.
 fn extract_trace_id_filter(expr: &Expr) -> Option<[u8; 16]> {
-    use ulid::Ulid;
     match expr {
         Expr::And(a, b) => extract_trace_id_filter(a).or_else(|| extract_trace_id_filter(b)),
         Expr::Eq(left, right) => match (left.as_ref(), right.as_ref()) {
             (Expr::Column(c), Expr::Literal(Literal::String(v))) if c == "trace_id" => {
-                Ulid::from_string(v).ok().map(|u| u.0.to_be_bytes())
+                parse_ulid_bytes(v)
             }
             _ => None,
         },
         _ => None,
     }
+}
+
+fn parse_ulid_bytes(value: &str) -> Option<[u8; 16]> {
+    ulid::Ulid::from_string(value)
+        .ok()
+        .map(|u| u.0.to_be_bytes())
+}
+
+fn fixed16_eq_bitmap(
+    reader: &SegmentReader,
+    rg_idx: usize,
+    column_idx: u32,
+    target: &[u8; 16],
+    sorted: bool,
+) -> ZenResult<RoaringBitmap> {
+    let page = reader.column_page_bytes(rg_idx, column_idx)?;
+    if page.len() < 4 {
+        return Err(ZenError::format("FixedRaw header truncated"));
+    }
+    let n = u32::from_le_bytes(page[..4].try_into().unwrap()) as usize;
+    let data = &page[4..];
+    let needed = n
+        .checked_mul(16)
+        .ok_or_else(|| ZenError::format("FixedRaw size overflow"))?;
+    if data.len() < needed {
+        return Err(ZenError::format("FixedRaw page truncated"));
+    }
+
+    let mut bm = RoaringBitmap::new();
+    let row_at = |idx: usize| -> &[u8] {
+        let off = idx * 16;
+        &data[off..off + 16]
+    };
+
+    if sorted {
+        let target = target.as_slice();
+        let mut lo = 0usize;
+        let mut hi = n;
+        while lo < hi {
+            let mid = (lo + hi) / 2;
+            if row_at(mid) < target {
+                lo = mid + 1;
+            } else {
+                hi = mid;
+            }
+        }
+        let start = lo;
+        while lo < n && row_at(lo) == target {
+            lo += 1;
+        }
+        if start < lo {
+            bm.insert_range(start as u32..lo as u32);
+        }
+        return Ok(bm);
+    }
+
+    for row in 0..n {
+        if row_at(row) == target {
+            bm.push(row as u32);
+        }
+    }
+    Ok(bm)
 }
 
 /// Returns `false` if the row group provably can't satisfy the predicate, given
@@ -831,24 +958,32 @@ fn eval_predicate(
         }
         Expr::Not(a) => {
             let l = eval_predicate(extras, col_idx, rg_idx, a, row_count)?;
-            let mut all = RoaringBitmap::new();
-            for i in 0..row_count {
-                all.insert(i as u32);
-            }
+            let all = full_row_bitmap(row_count);
             Ok(all - l)
         }
         Expr::Eq(left, right) => match (left.as_ref(), right.as_ref()) {
             (Expr::Column(c), Expr::Literal(Literal::String(v))) => {
-                let i = col_idx(c).ok_or_else(|| ZenError::query(format!("column {c} not found")))?;
+                let i =
+                    col_idx(c).ok_or_else(|| ZenError::query(format!("column {c} not found")))?;
                 // Fast path: cached bitmap posting list lookup if available.
                 if let Some(bm) = extras.posting_lookup_cached(rg_idx as u32, i, v.as_bytes()) {
                     return Ok((*bm).clone());
+                }
+                if matches!(
+                    reader.column_encoding(rg_idx, i)?,
+                    zen_format::PageEncoding::FixedRaw
+                ) {
+                    let Some(target) = parse_ulid_bytes(v) else {
+                        return Ok(RoaringBitmap::new());
+                    };
+                    return fixed16_eq_bitmap(reader, rg_idx, i, &target, c == "trace_id");
                 }
                 let cv = reader.read_column(rg_idx, i)?;
                 Ok(eq_string(&cv, v))
             }
             (Expr::Column(c), Expr::Literal(Literal::Int(v))) => {
-                let i = col_idx(c).ok_or_else(|| ZenError::query(format!("column {c} not found")))?;
+                let i =
+                    col_idx(c).ok_or_else(|| ZenError::query(format!("column {c} not found")))?;
                 let cv = reader.read_column(rg_idx, i)?;
                 Ok(eq_int(&cv, *v))
             }
@@ -870,13 +1005,7 @@ fn eval_predicate(
             }
             scan_jsonpath_eq(reader, col_idx, rg_idx, expr)
         }
-        Expr::Literal(Literal::Bool(true)) => {
-            let mut all = RoaringBitmap::new();
-            for i in 0..row_count {
-                all.insert(i as u32);
-            }
-            Ok(all)
-        }
+        Expr::Literal(Literal::Bool(true)) => Ok(full_row_bitmap(row_count)),
         Expr::Literal(Literal::Bool(false)) => Ok(RoaringBitmap::new()),
         _ => Err(ZenError::query(format!("unsupported predicate: {expr:?}"))),
     }
@@ -896,7 +1025,9 @@ fn eval_compare(
         matches!(expr, Expr::Ne(_, _)),
     );
     let (left, right) = match expr {
-        Expr::Lt(a, b) | Expr::Le(a, b) | Expr::Gt(a, b) | Expr::Ge(a, b) | Expr::Ne(a, b) => (a, b),
+        Expr::Lt(a, b) | Expr::Le(a, b) | Expr::Gt(a, b) | Expr::Ge(a, b) | Expr::Ne(a, b) => {
+            (a, b)
+        }
         // Defensive: every variant the precondition matches against
         // is enumerated above. If a future Expr variant slips through
         // the precondition check, return a structured error rather
@@ -928,7 +1059,7 @@ fn eval_compare(
                     false
                 };
                 if ok {
-                    bm.insert(idx as u32);
+                    bm.push(idx as u32);
                 }
             }
             return Ok(bm);
@@ -977,7 +1108,7 @@ fn scan_text_match(
             if let RowValue::Bytes(b) = view.row(r)? {
                 if let Ok(s) = std::str::from_utf8(&b) {
                     if s.to_lowercase().contains(&needle) {
-                        bm.insert(r as u32);
+                        bm.push(r as u32);
                     }
                 }
             }
@@ -1006,10 +1137,7 @@ fn scan_jsonpath_eq(
                         let bytes = &reader.bytes[start..end];
                         if let Ok(idx) = zen_jsonpath::JsonPathIndex::deserialize(bytes) {
                             if idx.knows_path(path) {
-                                let bm = idx
-                                    .lookup(path, value)
-                                    .cloned()
-                                    .unwrap_or_default();
+                                let bm = idx.lookup(path, value).cloned().unwrap_or_default();
                                 return Ok(bm);
                             }
                         }
@@ -1033,7 +1161,7 @@ fn scan_jsonpath_eq(
                         }
                     });
                     if found {
-                        bm.insert(r as u32);
+                        bm.push(r as u32);
                     }
                 }
             }
@@ -1080,12 +1208,24 @@ fn posting_lookup(
 
 fn eq_string(cv: &ColumnValues<'static>, value: &str) -> RoaringBitmap {
     let mut bm = RoaringBitmap::new();
-    if let ColumnValues::StringsOwned(v) = cv {
-        for (i, s) in v.iter().enumerate() {
-            if s.as_slice() == value.as_bytes() {
-                bm.insert(i as u32);
+    match cv {
+        ColumnValues::StringsOwned(v) => {
+            for (i, s) in v.iter().enumerate() {
+                if s.as_slice() == value.as_bytes() {
+                    bm.push(i as u32);
+                }
             }
         }
+        ColumnValues::Fixed16(v) => {
+            if let Some(target) = parse_ulid_bytes(value) {
+                for (i, b) in v.iter().enumerate() {
+                    if *b == target {
+                        bm.push(i as u32);
+                    }
+                }
+            }
+        }
+        _ => {}
     }
     bm
 }
@@ -1095,7 +1235,7 @@ fn eq_int(cv: &ColumnValues<'static>, value: i64) -> RoaringBitmap {
     if let ColumnValues::I64(v) = cv {
         for (i, x) in v.iter().enumerate() {
             if *x == value {
-                bm.insert(i as u32);
+                bm.push(i as u32);
             }
         }
     }
@@ -1121,10 +1261,7 @@ fn materialize_rows(
     for c in &cols_to_decode {
         if let Some(i) = col_idx(c) {
             // Some columns (e.g. embedding) may not have a page for this row group.
-            if reader.row_groups[rg_idx]
-                .descriptor_for_column(i)
-                .is_some()
-            {
+            if reader.row_groups[rg_idx].descriptor_for_column(i).is_some() {
                 views.push(((*c).clone(), reader.open_page(rg_idx, i)?));
             }
         }
@@ -1165,13 +1302,18 @@ fn row_value_to_json(v: RowValue) -> serde_json::Value {
     }
 }
 
-fn compare_json_values(a: Option<&serde_json::Value>, b: Option<&serde_json::Value>) -> std::cmp::Ordering {
+fn compare_json_values(
+    a: Option<&serde_json::Value>,
+    b: Option<&serde_json::Value>,
+) -> std::cmp::Ordering {
     use std::cmp::Ordering;
     match (a, b) {
         (Some(x), Some(y)) => match (x, y) {
-            (serde_json::Value::Number(a), serde_json::Value::Number(b)) => {
-                a.as_f64().unwrap_or(0.0).partial_cmp(&b.as_f64().unwrap_or(0.0)).unwrap_or(Ordering::Equal)
-            }
+            (serde_json::Value::Number(a), serde_json::Value::Number(b)) => a
+                .as_f64()
+                .unwrap_or(0.0)
+                .partial_cmp(&b.as_f64().unwrap_or(0.0))
+                .unwrap_or(Ordering::Equal),
             (serde_json::Value::String(a), serde_json::Value::String(b)) => a.cmp(b),
             _ => Ordering::Equal,
         },
@@ -1198,12 +1340,7 @@ fn run_group_aggregate(rows: &[ResultRow], plan: &LogicalPlan) -> Vec<ResultRow>
         let key: Vec<String> = plan
             .group_by
             .iter()
-            .map(|c| {
-                row.fields
-                    .get(c)
-                    .map(value_to_string)
-                    .unwrap_or_default()
-            })
+            .map(|c| row.fields.get(c).map(value_to_string).unwrap_or_default())
             .collect();
         groups.entry(key).or_default().push(row.clone());
     }
@@ -1212,7 +1349,8 @@ fn run_group_aggregate(rows: &[ResultRow], plan: &LogicalPlan) -> Vec<ResultRow>
         .map(|(key, group_rows)| {
             let mut row = ResultRow::default();
             for (i, c) in plan.group_by.iter().enumerate() {
-                row.fields.insert(c.clone(), serde_json::Value::String(key[i].clone()));
+                row.fields
+                    .insert(c.clone(), serde_json::Value::String(key[i].clone()));
             }
             for (label, agg) in &plan.aggregates {
                 let result = compute_aggregate(&group_rows, agg);
@@ -1366,7 +1504,9 @@ fn arrow_batch_to_rows(
     trace_id_filter: Option<[u8; 16]>,
     out: &mut Vec<ResultRow>,
 ) -> ZenResult<()> {
-    use arrow_array::{Array, FixedSizeBinaryArray, Int64Array, StringArray, UInt32Array, UInt64Array};
+    use arrow_array::{
+        Array, FixedSizeBinaryArray, Int64Array, StringArray, UInt32Array, UInt64Array,
+    };
 
     let schema = batch.schema();
     let n = batch.num_rows();
@@ -1380,7 +1520,11 @@ fn arrow_batch_to_rows(
     // Trace_id pre-filter.
     if let Some(tid_filter) = trace_id_filter {
         if let Ok(i) = schema.index_of("trace_id") {
-            if let Some(arr) = batch.column(i).as_any().downcast_ref::<FixedSizeBinaryArray>() {
+            if let Some(arr) = batch
+                .column(i)
+                .as_any()
+                .downcast_ref::<FixedSizeBinaryArray>()
+            {
                 for r in 0..n {
                     if mask[r] && arr.value(r) != tid_filter {
                         mask[r] = false;
@@ -1449,15 +1593,9 @@ fn arrow_batch_to_rows(
                 ColRef::Str(a) if !a.is_null(row_idx) => {
                     serde_json::Value::String(a.value(row_idx).to_string())
                 }
-                ColRef::I64(a) if !a.is_null(row_idx) => {
-                    serde_json::Value::from(a.value(row_idx))
-                }
-                ColRef::U32(a) if !a.is_null(row_idx) => {
-                    serde_json::Value::from(a.value(row_idx))
-                }
-                ColRef::U64(a) if !a.is_null(row_idx) => {
-                    serde_json::Value::from(a.value(row_idx))
-                }
+                ColRef::I64(a) if !a.is_null(row_idx) => serde_json::Value::from(a.value(row_idx)),
+                ColRef::U32(a) if !a.is_null(row_idx) => serde_json::Value::from(a.value(row_idx)),
+                ColRef::U64(a) if !a.is_null(row_idx) => serde_json::Value::from(a.value(row_idx)),
                 ColRef::Fix16(a) if !a.is_null(row_idx) => {
                     let b = a.value(row_idx);
                     if b.len() == 16 {
@@ -1704,7 +1842,10 @@ mod tests {
         let store: Arc<dyn BlobStore> = Arc::new(InMemoryStore::default());
         let catalog: Arc<dyn Catalog> = Arc::new(SqliteCatalog::open_in_memory().await.unwrap());
         catalog.ensure_tenant(TenantId(1), "t").await.unwrap();
-        catalog.ensure_partition(TenantId(1), PartitionId(0)).await.unwrap();
+        catalog
+            .ensure_partition(TenantId(1), PartitionId(0))
+            .await
+            .unwrap();
 
         let mut rows = Vec::new();
         for t in 0..5u32 {
@@ -1818,6 +1959,59 @@ mod tests {
         let rs = execute(&plan, catalog, store).await.unwrap();
         // s=7 has "out of memory" → 5 traces × 1 span = 5.
         assert_eq!(rs.rows.len(), 5);
+    }
+
+    #[tokio::test]
+    async fn trace_id_point_lookup_uses_fixed_id_column() {
+        let (catalog, store) = setup_indexed_segment().await;
+        let mut tid = [0u8; 16];
+        tid[0..4].copy_from_slice(&3u32.to_be_bytes());
+        let trace_id = TraceId(tid).to_string();
+        let plan = LogicalPlan {
+            tenant_id: 1,
+            partition_ids: vec![0],
+            projection: Projection::list(["trace_id".into(), "span_id".into()]),
+            predicate: Some(Predicate {
+                expr: Expr::eq(Expr::col("trace_id"), Expr::lit_str(trace_id.clone())),
+            }),
+            time_min_ms: 0,
+            time_max_ms: i64::MAX,
+            ..Default::default()
+        };
+        let rs = execute(&plan, catalog, store).await.unwrap();
+        assert_eq!(rs.rows.len(), 10);
+        for row in &rs.rows {
+            assert_eq!(
+                row.fields.get("trace_id").unwrap().as_str(),
+                Some(trace_id.as_str())
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn span_id_point_lookup_uses_fixed_id_column() {
+        let (catalog, store) = setup_indexed_segment().await;
+        let mut sid = [0u8; 16];
+        sid[0..4].copy_from_slice(&2u32.to_be_bytes());
+        sid[4..8].copy_from_slice(&7u32.to_be_bytes());
+        let span_id = SpanId(sid).to_string();
+        let plan = LogicalPlan {
+            tenant_id: 1,
+            partition_ids: vec![0],
+            projection: Projection::list(["trace_id".into(), "span_id".into()]),
+            predicate: Some(Predicate {
+                expr: Expr::eq(Expr::col("span_id"), Expr::lit_str(span_id.clone())),
+            }),
+            time_min_ms: 0,
+            time_max_ms: i64::MAX,
+            ..Default::default()
+        };
+        let rs = execute(&plan, catalog, store).await.unwrap();
+        assert_eq!(rs.rows.len(), 1);
+        assert_eq!(
+            rs.rows[0].fields.get("span_id").unwrap().as_str(),
+            Some(span_id.as_str())
+        );
     }
 
     #[tokio::test]

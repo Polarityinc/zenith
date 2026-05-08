@@ -8,11 +8,7 @@ pub fn spans_arrow_schema() -> Arc<ArrowSchema> {
     Arc::new(ArrowSchema::new(vec![
         Field::new("tenant_id", DataType::UInt64, false),
         Field::new("partition_id", DataType::UInt32, false),
-        Field::new(
-            "trace_id",
-            DataType::FixedSizeBinary(16),
-            false,
-        ),
+        Field::new("trace_id", DataType::FixedSizeBinary(16), false),
         Field::new("span_id", DataType::FixedSizeBinary(16), false),
         Field::new("parent_span_id", DataType::FixedSizeBinary(16), true),
         Field::new("start_time_ms", DataType::Int64, false),

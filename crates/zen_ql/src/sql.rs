@@ -13,8 +13,8 @@ use zen_query::logical::{AggregateFn, LogicalPlan, Predicate, Projection};
 
 pub fn parse_sql(sql: &str, tenant_id: u64) -> Result<LogicalPlan, ZenError> {
     let dialect = GenericDialect {};
-    let stmts = Parser::parse_sql(&dialect, sql)
-        .map_err(|e| ZenError::query(format!("sql parse: {e}")))?;
+    let stmts =
+        Parser::parse_sql(&dialect, sql).map_err(|e| ZenError::query(format!("sql parse: {e}")))?;
     if stmts.len() != 1 {
         return Err(ZenError::query("expected exactly one statement"));
     }
@@ -64,7 +64,9 @@ fn parse_query(q: &Query, tenant_id: u64) -> Result<LogicalPlan, ZenError> {
 
     // WHERE.
     if let Some(w) = &select.selection {
-        plan.predicate = Some(Predicate { expr: parse_expr(w)? });
+        plan.predicate = Some(Predicate {
+            expr: parse_expr(w)?,
+        });
     }
 
     // GROUP BY.
@@ -102,7 +104,10 @@ fn parse_projection(items: &[SelectItem]) -> Result<Projection, ZenError> {
     for item in items {
         match item {
             SelectItem::UnnamedExpr(SqlExpr::Identifier(id)) => cols.push(id.value.clone()),
-            SelectItem::ExprWithAlias { expr: SqlExpr::Identifier(id), alias } => {
+            SelectItem::ExprWithAlias {
+                expr: SqlExpr::Identifier(id),
+                alias,
+            } => {
                 let _ = alias;
                 cols.push(id.value.clone());
             }
@@ -248,7 +253,8 @@ fn parse_expr_rec(e: &SqlExpr, depth: u32) -> Result<Expr, ZenError> {
             let r = parse_expr_rec(right, depth + 1)?;
             // Metadata-prefix → JsonPathEq if both sides match.
             if let (Expr::Column(c), Expr::Literal(Literal::String(v))) = (&l, &r) {
-                if c.contains('.') && c.starts_with("metadata.") && matches!(op, BinaryOperator::Eq) {
+                if c.contains('.') && c.starts_with("metadata.") && matches!(op, BinaryOperator::Eq)
+                {
                     let path = c.trim_start_matches("metadata.").to_string();
                     return Ok(Expr::JsonPathEq {
                         path,
@@ -280,10 +286,16 @@ fn parse_expr_rec(e: &SqlExpr, depth: u32) -> Result<Expr, ZenError> {
                     FunctionArguments::List(l) => l.args.iter(),
                     _ => return Err(ZenError::query("text_match requires args")),
                 };
-                let col = args_iter.next().ok_or_else(|| ZenError::query("text_match needs column"))?;
-                let qarg = args_iter.next().ok_or_else(|| ZenError::query("text_match needs query"))?;
+                let col = args_iter
+                    .next()
+                    .ok_or_else(|| ZenError::query("text_match needs column"))?;
+                let qarg = args_iter
+                    .next()
+                    .ok_or_else(|| ZenError::query("text_match needs query"))?;
                 let column = match col {
-                    FunctionArg::Unnamed(FunctionArgExpr::Expr(SqlExpr::Identifier(id))) => id.value.clone(),
+                    FunctionArg::Unnamed(FunctionArgExpr::Expr(SqlExpr::Identifier(id))) => {
+                        id.value.clone()
+                    }
                     _ => return Err(ZenError::query("text_match arg 1 must be column")),
                 };
                 let query = match qarg {
@@ -294,9 +306,13 @@ fn parse_expr_rec(e: &SqlExpr, depth: u32) -> Result<Expr, ZenError> {
                 };
                 return Ok(Expr::TextMatch { column, query });
             }
-            Err(ZenError::query(format!("unsupported function in WHERE: {name}")))
+            Err(ZenError::query(format!(
+                "unsupported function in WHERE: {name}"
+            )))
         }
-        other => Err(ZenError::query(format!("unsupported expression: {other:?}"))),
+        other => Err(ZenError::query(format!(
+            "unsupported expression: {other:?}"
+        ))),
     }
 }
 
@@ -339,11 +355,7 @@ mod tests {
 
     #[test]
     fn parse_group_by_count() {
-        let p = parse_sql(
-            "SELECT model, count(*) AS n FROM spans GROUP BY model",
-            1,
-        )
-        .unwrap();
+        let p = parse_sql("SELECT model, count(*) AS n FROM spans GROUP BY model", 1).unwrap();
         assert_eq!(p.group_by, vec!["model".to_string()]);
         assert_eq!(p.aggregates.len(), 1);
         match &p.aggregates[0].1 {

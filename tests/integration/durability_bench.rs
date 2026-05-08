@@ -111,7 +111,8 @@ fn p_quantile(samples: &mut [f64], q: f64) -> f64 {
 #[ignore]
 async fn durability_vs_unsafe_fast_write_flush() {
     let mut durable = run_one_pass(|root| Arc::new(LocalFsStore::new(root).unwrap())).await;
-    let mut fast = run_one_pass(|root| Arc::new(LocalFsStore::new_unsafe_fast(root).unwrap())).await;
+    let mut fast =
+        run_one_pass(|root| Arc::new(LocalFsStore::new_unsafe_fast(root).unwrap())).await;
 
     let durable_p50 = p_quantile(&mut durable, 0.50);
     let durable_p95 = p_quantile(&mut durable, 0.95);
@@ -183,8 +184,7 @@ async fn group_commit_concurrent_write_flush() {
         latencies_ms
     }
 
-    let mut durable =
-        one_concurrent_pass(|root| Arc::new(LocalFsStore::new(root).unwrap())).await;
+    let mut durable = one_concurrent_pass(|root| Arc::new(LocalFsStore::new(root).unwrap())).await;
     let mut fast =
         one_concurrent_pass(|root| Arc::new(LocalFsStore::new_unsafe_fast(root).unwrap())).await;
 

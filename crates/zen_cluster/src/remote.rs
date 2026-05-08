@@ -146,7 +146,10 @@ impl RemoteClient {
         // Pre-serialize the body so we can both sign it and ship it.
         // Doing this once avoids re-encoding inside `reqwest`.
         let body = serde_json::to_vec(req).map_err(|e| RemoteError::Decode(format!("{e}")))?;
-        let mut builder = self.http.post(&url).header("content-type", "application/json");
+        let mut builder = self
+            .http
+            .post(&url)
+            .header("content-type", "application/json");
         if let Some(signer) = &self.signer {
             let ts = chrono::Utc::now().timestamp();
             let sig = signer
@@ -244,7 +247,9 @@ mod endpoint_tests {
 
     #[test]
     fn blocks_imds() {
-        assert!(!is_endpoint_allowed("http://169.254.169.254/latest/meta-data/"));
+        assert!(!is_endpoint_allowed(
+            "http://169.254.169.254/latest/meta-data/"
+        ));
         assert!(!is_endpoint_allowed("http://metadata.google.internal"));
         assert!(!is_endpoint_allowed("http://[fe80::1]:80"));
     }
@@ -255,4 +260,3 @@ mod endpoint_tests {
         assert!(!is_endpoint_allowed("ftp://attacker"));
     }
 }
-

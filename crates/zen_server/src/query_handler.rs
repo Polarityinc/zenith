@@ -59,7 +59,8 @@ pub async fn handle_query(
     let elapsed = started.elapsed().as_secs_f64();
     let status = if result.is_ok() { "ok" } else { "error" };
     metrics::histogram!(names::QUERY_DURATION, "tenant" => tenant_label.clone()).record(elapsed);
-    metrics::counter!(names::QUERIES_TOTAL, "tenant" => tenant_label, "status" => status).increment(1);
+    metrics::counter!(names::QUERIES_TOTAL, "tenant" => tenant_label, "status" => status)
+        .increment(1);
     result
 }
 

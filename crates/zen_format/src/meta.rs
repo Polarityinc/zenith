@@ -107,8 +107,12 @@ mod tests {
     fn observe_min_max() {
         let fp = SchemaFingerprint(0);
         let mut m = SegmentMetadata::new(
-            0, TenantId(0), PartitionId(0), fp,
-            vec!["a".to_string()], vec!["a".to_string()],
+            0,
+            TenantId(0),
+            PartitionId(0),
+            fp,
+            vec!["a".to_string()],
+            vec!["a".to_string()],
         );
         m.observe_time(1000);
         m.observe_time(50);
@@ -126,7 +130,10 @@ mod tests {
     #[test]
     fn bincode_roundtrip() {
         let m = SegmentMetadata::new(
-            42, TenantId(1), PartitionId(2), SchemaFingerprint(99),
+            42,
+            TenantId(1),
+            PartitionId(2),
+            SchemaFingerprint(99),
             vec!["x".into(), "y".into()],
             vec!["x".into()],
         );

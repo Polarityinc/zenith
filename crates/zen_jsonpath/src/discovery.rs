@@ -66,7 +66,9 @@ pub fn discover_paths<'a, I: IntoIterator<Item = &'a Value>>(
         });
     }
 
-    let min_count = ((total as f64) * cfg.min_presence_pct / 100.0).max(1.0).round() as u32;
+    let min_count = ((total as f64) * cfg.min_presence_pct / 100.0)
+        .max(1.0)
+        .round() as u32;
     let mut out: Vec<DiscoveredPath> = path_count
         .into_iter()
         .filter(|(_, c)| *c >= min_count)

@@ -97,9 +97,10 @@ impl SegmentWriter {
         let mut hdrs_bytes: Vec<Vec<u8>> = Vec::with_capacity(self.row_groups.len());
         for (header, _) in &self.row_groups {
             // Placeholder — we'll re-encode after offsets are known.
-            hdrs_bytes.push(bincode::serialize(header).map_err(|e| {
-                ZenError::format(format!("row group header serialize: {e}"))
-            })?);
+            hdrs_bytes.push(
+                bincode::serialize(header)
+                    .map_err(|e| ZenError::format(format!("row group header serialize: {e}")))?,
+            );
         }
         // Total bytes for `n_rg(u32) + Σ(header_len(u32) + header_bytes)`
         let mut headers_block_len: u64 = 4; // n_rg
@@ -143,8 +144,7 @@ impl SegmentWriter {
         // Write inline indexes.
         let inline_indexes_offset = buf.len() as u64;
         buf.put_slice(&self.inline_indexes);
-        let inline_indexes_length =
-            (buf.len() as u64) - inline_indexes_offset;
+        let inline_indexes_length = (buf.len() as u64) - inline_indexes_offset;
 
         // Write hotcache.
         let hc_bytes = bincode::serialize(&self.hotcache)

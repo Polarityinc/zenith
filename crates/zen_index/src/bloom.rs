@@ -45,7 +45,10 @@ impl BloomFilter {
         for _ in 0..self.k {
             let bit = (state as usize) % m;
             self.bits[bit / 8] |= 1 << (bit % 8);
-            state = state.wrapping_mul(0x9E37_79B9_7F4A_7C15).rotate_left(13).wrapping_add(0xC2B2_AE3D_27D4_EB4F);
+            state = state
+                .wrapping_mul(0x9E37_79B9_7F4A_7C15)
+                .rotate_left(13)
+                .wrapping_add(0xC2B2_AE3D_27D4_EB4F);
         }
     }
 
@@ -58,7 +61,10 @@ impl BloomFilter {
             if self.bits[bit / 8] & (1 << (bit % 8)) == 0 {
                 return false;
             }
-            state = state.wrapping_mul(0x9E37_79B9_7F4A_7C15).rotate_left(13).wrapping_add(0xC2B2_AE3D_27D4_EB4F);
+            state = state
+                .wrapping_mul(0x9E37_79B9_7F4A_7C15)
+                .rotate_left(13)
+                .wrapping_add(0xC2B2_AE3D_27D4_EB4F);
         }
         true
     }

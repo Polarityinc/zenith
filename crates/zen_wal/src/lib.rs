@@ -7,9 +7,9 @@
 //! succeed (the loser increments commit-id and retries).
 
 pub mod format;
-pub mod writer;
 pub mod reader;
+pub mod writer;
 
-pub use format::{WalHeader, WalObjectKey, MAGIC, FORMAT_VERSION};
-pub use writer::WalWriter;
+pub use format::{WalHeader, WalObjectKey, FORMAT_VERSION, MAGIC};
 pub use reader::WalReader;
+pub use writer::WalWriter;

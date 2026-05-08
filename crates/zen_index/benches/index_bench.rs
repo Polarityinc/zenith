@@ -77,5 +77,10 @@ fn bench_bloom(c: &mut Criterion) {
     group.finish();
 }
 
-criterion_group!(benches, bench_posting_build, bench_posting_intersect, bench_bloom);
+criterion_group!(
+    benches,
+    bench_posting_build,
+    bench_posting_intersect,
+    bench_bloom
+);
 criterion_main!(benches);

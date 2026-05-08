@@ -39,13 +39,17 @@ fn build_realistic_segment(rows: usize) -> Vec<u8> {
     rgb.add_page(0, e, b.to_vec(), 16 * rows as u64);
 
     // start_time_ms
-    let times: Vec<i64> = (0..rows as i64).map(|i| 1_700_000_000_000 + i * 1000).collect();
+    let times: Vec<i64> = (0..rows as i64)
+        .map(|i| 1_700_000_000_000 + i * 1000)
+        .collect();
     let (e, b) = encode_page(ColumnValues::I64(times), PageEncoding::For).unwrap();
     rgb.add_page(1, e, b.to_vec(), 8 * rows as u64);
 
     // model (low-cardinality)
     let pool = ["gpt-4o", "claude-sonnet-4-7", "haiku-4-5", "gpt-5-mini"];
-    let models: Vec<Vec<u8>> = (0..rows).map(|i| pool[i % pool.len()].as_bytes().to_vec()).collect();
+    let models: Vec<Vec<u8>> = (0..rows)
+        .map(|i| pool[i % pool.len()].as_bytes().to_vec())
+        .collect();
     let (e, b) = encode_page(ColumnValues::StringsOwned(models), PageEncoding::Dict).unwrap();
     rgb.add_page(2, e, b.to_vec(), 8 * rows as u64);
 
@@ -56,7 +60,9 @@ fn build_realistic_segment(rows: usize) -> Vec<u8> {
         b"finished tool call get_user_orders successfully",
         b"received chunk 3 of 12 from streaming response",
     ];
-    let prompts: Vec<Vec<u8>> = (0..rows).map(|i| prompt_pool[i % prompt_pool.len()].to_vec()).collect();
+    let prompts: Vec<Vec<u8>> = (0..rows)
+        .map(|i| prompt_pool[i % prompt_pool.len()].to_vec())
+        .collect();
     let raw_prompt_bytes: u64 = prompts.iter().map(|p| p.len() as u64).sum();
     let (e, b) = encode_page(
         ColumnValues::StringsOwned(prompts),

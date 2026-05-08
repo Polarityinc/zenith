@@ -11,7 +11,7 @@ use std::path::Path;
 
 use bytes::{BufMut, Bytes, BytesMut};
 use serde::{Deserialize, Serialize};
-use tantivy::schema::{Schema as TSchema, STORED, TEXT};
+use tantivy::schema::{Schema as TSchema, FAST, STORED, TEXT};
 use tantivy::{doc, Index, IndexWriter};
 use tempfile::TempDir;
 
@@ -28,11 +28,7 @@ pub struct BuildOptions {
 impl Default for BuildOptions {
     fn default() -> Self {
         Self {
-            field_names: vec![
-                "prompt".into(),
-                "completion".into(),
-                "tool_io_text".into(),
-            ],
+            field_names: vec!["prompt".into(), "completion".into(), "tool_io_text".into()],
             writer_memory_bytes: 50_000_000,
         }
     }
@@ -71,8 +67,10 @@ pub fn build_fts_index<A: FieldAccessor>(
         let f = sb.add_text_field(name, TEXT);
         field_handles.push(f);
     }
-    // Add a synthetic stored field for the row index so BM25 result → row mask.
-    let row_idx_field = sb.add_u64_field("__row_idx", STORED);
+    // Add a synthetic row index so BM25 result → row mask. FAST lets the
+    // query path read row ids from Tantivy's columnstore instead of fetching
+    // and decoding stored documents for every hit.
+    let row_idx_field = sb.add_u64_field("__row_idx", FAST | STORED);
     let schema = sb.build();
 
     // Write to a temp dir.
@@ -102,10 +100,7 @@ pub fn build_fts_index<A: FieldAccessor>(
     drop(writer);
 
     let blob = serialize_dir(dir.path())?;
-    Ok(BuildResult {
-        blob,
-        doc_count: n,
-    })
+    Ok(BuildResult { blob, doc_count: n })
 }
 
 pub fn serialize_dir(path: &Path) -> ZenResult<Bytes> {
@@ -113,8 +108,8 @@ pub fn serialize_dir(path: &Path) -> ZenResult<Bytes> {
     let mut entries: Vec<(String, Vec<u8>)> = Vec::new();
     let mut stack = vec![path.to_path_buf()];
     while let Some(d) = stack.pop() {
-        for ent in std::fs::read_dir(&d)
-            .map_err(|e| ZenError::format(format!("read_dir {d:?}: {e}")))?
+        for ent in
+            std::fs::read_dir(&d).map_err(|e| ZenError::format(format!("read_dir {d:?}: {e}")))?
         {
             let ent = ent.map_err(|e| ZenError::format(format!("dir entry: {e}")))?;
             let p = ent.path();
@@ -138,6 +133,9 @@ pub fn serialize_dir(path: &Path) -> ZenResult<Bytes> {
     let mut manifest = Vec::with_capacity(entries.len());
     let mut payload = Vec::new();
     for (name, bytes) in entries {
+        if is_tantivy_lock_file(&name) {
+            continue;
+        }
         manifest.push(ManifestEntry {
             name,
             offset: payload.len() as u64,
@@ -153,4 +151,8 @@ pub fn serialize_dir(path: &Path) -> ZenResult<Bytes> {
     out.put_slice(&manifest_bytes);
     out.put_slice(&payload);
     Ok(out.freeze())
+}
+
+fn is_tantivy_lock_file(path: &str) -> bool {
+    matches!(path, ".tantivy-writer.lock" | ".tantivy-meta.lock")
 }

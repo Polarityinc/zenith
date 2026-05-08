@@ -163,12 +163,12 @@ impl JwtVerifier {
             scope: Option<String>,
         }
 
-        let data = decode::<RawClaims>(token, &key, &self.inner.validation).map_err(|e| {
-            match e.kind() {
-                jsonwebtoken::errors::ErrorKind::ExpiredSignature => JwtError::Expired,
-                jsonwebtoken::errors::ErrorKind::InvalidSignature => JwtError::BadSignature,
-                _ => JwtError::Malformed,
-            }
+        let data = decode::<RawClaims>(token, &key, &self.inner.validation).map_err(|e| match e
+            .kind()
+        {
+            jsonwebtoken::errors::ErrorKind::ExpiredSignature => JwtError::Expired,
+            jsonwebtoken::errors::ErrorKind::InvalidSignature => JwtError::BadSignature,
+            _ => JwtError::Malformed,
         })?;
         let raw = data.claims;
         let tenant = raw.tenant_id.ok_or(JwtError::MissingClaim("tenant_id"))?;
@@ -209,7 +209,10 @@ impl JwtVerifier {
         // SECURITY: JWKS must come over HTTPS — over plain HTTP a MITM
         // can swap in attacker-controlled keys and forge any JWT. The
         // only exception is `http://localhost` for in-process tests.
-        if !url.starts_with("https://") && !url.starts_with("http://localhost") && !url.starts_with("http://127.0.0.1") {
+        if !url.starts_with("https://")
+            && !url.starts_with("http://localhost")
+            && !url.starts_with("http://127.0.0.1")
+        {
             return Err(JwtError::JwksFetch(format!(
                 "JWKS URL must use https:// (got: {url})"
             )));
@@ -250,10 +253,7 @@ impl JwtVerifier {
             serde_json::from_slice(&buf).map_err(|e| JwtError::JwksParse(format!("{e}")))?;
         let mut by_kid = HashMap::new();
         for jwk in jwks.keys.iter() {
-            if let (Some(kid), Ok(key)) = (
-                jwk.common.key_id.as_ref(),
-                DecodingKey::from_jwk(jwk),
-            ) {
+            if let (Some(kid), Ok(key)) = (jwk.common.key_id.as_ref(), DecodingKey::from_jwk(jwk)) {
                 by_kid.insert(kid.clone(), key);
             }
         }

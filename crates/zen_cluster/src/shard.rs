@@ -246,9 +246,6 @@ mod tests {
         }
         // 1/11 ≈ 9 % expected; allow generous slack for randomness.
         let pct = moved as f64 / total as f64;
-        assert!(
-            pct > 0.03 && pct < 0.20,
-            "expected ~9% remap, got {pct:.3}"
-        );
+        assert!(pct > 0.03 && pct < 0.20, "expected ~9% remap, got {pct:.3}");
     }
 }

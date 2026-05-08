@@ -93,7 +93,10 @@ impl<'a> ColumnValues<'a> {
 /// Encode a column page. Returns the encoded bytes plus the actual encoding
 /// used. The caller passes a hint, but `encode_page` may downgrade to a more
 /// general encoding if the data doesn't fit the hint.
-pub fn encode_page(values: ColumnValues<'_>, hint: PageEncoding) -> Result<(PageEncoding, Bytes), ZenError> {
+pub fn encode_page(
+    values: ColumnValues<'_>,
+    hint: PageEncoding,
+) -> Result<(PageEncoding, Bytes), ZenError> {
     match (hint, values) {
         (PageEncoding::FsstWithOffsets, ColumnValues::Strings(v)) => {
             let comp = FsstCompressor::train(&v);
@@ -507,8 +510,7 @@ mod tests {
 
     #[test]
     fn dict_roundtrip() {
-        let rows: Vec<Vec<u8>> =
-            vec![b"gpt-4o".to_vec(), b"haiku".to_vec(), b"gpt-4o".to_vec()];
+        let rows: Vec<Vec<u8>> = vec![b"gpt-4o".to_vec(), b"haiku".to_vec(), b"gpt-4o".to_vec()];
         let cv = ColumnValues::StringsOwned(rows.clone());
         let (enc, bytes) = encode_page(cv, PageEncoding::Dict).unwrap();
         let decoded = decode_page(enc, &bytes).unwrap();

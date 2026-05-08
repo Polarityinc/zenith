@@ -81,7 +81,10 @@ pub fn router(state: ServerState) -> Router {
         .with_state(state)
 }
 
-pub async fn serve(state: ServerState, addr: &str) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+pub async fn serve(
+    state: ServerState,
+    addr: &str,
+) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let tls_cert = state.config.server.tls.cert_path.clone();
     let tls_key = state.config.server.tls.key_path.clone();
     let app = router(state);
@@ -92,9 +95,12 @@ pub async fn serve(state: ServerState, addr: &str) -> Result<(), Box<dyn std::er
         let tls_config = load_rustls_config(&tls_cert, &tls_key)?;
         let socket: std::net::SocketAddr = addr.parse()?;
         tracing::info!(%addr, %tls_cert, "zenithdb https listening (rustls + aws-lc-rs)");
-        axum_server::bind_rustls(socket, axum_server::tls_rustls::RustlsConfig::from_config(std::sync::Arc::new(tls_config)))
-            .serve(app.into_make_service())
-            .await?;
+        axum_server::bind_rustls(
+            socket,
+            axum_server::tls_rustls::RustlsConfig::from_config(std::sync::Arc::new(tls_config)),
+        )
+        .serve(app.into_make_service())
+        .await?;
     } else {
         let listener = tokio::net::TcpListener::bind(addr).await?;
         tracing::info!(%addr, "zenithdb http listening (plaintext — TLS not configured)");
@@ -111,8 +117,8 @@ fn load_rustls_config(
     use std::io::BufReader;
     let cert_file = File::open(cert_path)?;
     let key_file = File::open(key_path)?;
-    let certs: Vec<_> = rustls_pemfile::certs(&mut BufReader::new(cert_file))
-        .collect::<Result<Vec<_>, _>>()?;
+    let certs: Vec<_> =
+        rustls_pemfile::certs(&mut BufReader::new(cert_file)).collect::<Result<Vec<_>, _>>()?;
     let key = rustls_pemfile::private_key(&mut BufReader::new(key_file))?
         .ok_or("no private key found in key_path")?;
     let cfg = rustls::ServerConfig::builder()

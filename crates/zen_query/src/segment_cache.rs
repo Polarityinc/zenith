@@ -32,11 +32,7 @@ pub struct SegmentExtras {
 
 const MAX_RESULT_ENTRIES: usize = 32_768;
 
-fn cap_insert<K: Eq + std::hash::Hash + Clone, V>(
-    map: &RwLock<HashMap<K, V>>,
-    k: K,
-    v: V,
-) {
+fn cap_insert<K: Eq + std::hash::Hash + Clone, V>(map: &RwLock<HashMap<K, V>>, k: K, v: V) {
     let mut g = map.write();
     if g.len() >= MAX_RESULT_ENTRIES {
         // Drop one arbitrary key (cheap; we don't need true LRU here).

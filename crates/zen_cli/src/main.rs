@@ -105,7 +105,9 @@ enum Cmd {
 #[tokio::main]
 async fn main() -> Result<()> {
     tracing_subscriber::fmt()
-        .with_env_filter(EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info")))
+        .with_env_filter(
+            EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info")),
+        )
         .with_target(false)
         .init();
     let cli = Cli::parse();
@@ -156,10 +158,7 @@ async fn cmd_admin_backup(config_path: PathBuf, tenant: u64, out: PathBuf) -> Re
         .list_segments_for_tenant(zen_common::TenantId(tenant))
         .await?;
     let mut manifest = serde_json::Map::new();
-    manifest.insert(
-        "tenant_id".into(),
-        serde_json::Value::Number(tenant.into()),
-    );
+    manifest.insert("tenant_id".into(), serde_json::Value::Number(tenant.into()));
     manifest.insert(
         "snapshot_at".into(),
         serde_json::Value::String(chrono::Utc::now().to_rfc3339()),
@@ -186,11 +185,7 @@ async fn cmd_admin_backup(config_path: PathBuf, tenant: u64, out: PathBuf) -> Re
     manifest.insert("segments".into(), serde_json::Value::Array(seg_array));
     let manifest_path = out.join("manifest.json");
     std::fs::write(&manifest_path, serde_json::to_vec_pretty(&manifest)?)?;
-    println!(
-        "backup: {} segments → {}",
-        segs.len(),
-        out.display()
-    );
+    println!("backup: {} segments → {}", segs.len(), out.display());
     Ok(())
 }
 
@@ -253,9 +248,7 @@ async fn cmd_admin_restore(config_path: PathBuf, tenant: u64, from: PathBuf) -> 
             anyhow::bail!("manifest segment path escapes backup root: {path:?}");
         }
         let bytes = std::fs::read(&path)?;
-        store
-            .put(&object_key, bytes::Bytes::from(bytes))
-            .await?;
+        store.put(&object_key, bytes::Bytes::from(bytes)).await?;
         catalog
             .register_segment(SegmentRow {
                 segment_id,
@@ -284,8 +277,7 @@ async fn cmd_admin_restore(config_path: PathBuf, tenant: u64, from: PathBuf) -> 
 }
 
 async fn cmd_serve(config_path: PathBuf) -> Result<()> {
-    let cfg = zen_common::Config::load_from_path(&config_path)
-        .context("failed to load config")?;
+    let cfg = zen_common::Config::load_from_path(&config_path).context("failed to load config")?;
 
     let store = zen_storage::open_blob_store(&cfg).await?;
     let catalog = zen_catalog::open_catalog(&cfg).await?;
@@ -308,8 +300,7 @@ async fn cmd_serve(config_path: PathBuf) -> Result<()> {
     });
     let http_result = zen_server::http::serve(state, &http_addr).await;
     grpc_task.abort();
-    http_result
-        .map_err(|e| anyhow::anyhow!("{e}"))?;
+    http_result.map_err(|e| anyhow::anyhow!("{e}"))?;
     Ok(())
 }
 
@@ -377,7 +368,8 @@ async fn cmd_bench_run(
 
 async fn cmd_bench_compare(candidate: PathBuf, leaderboard: PathBuf) -> Result<()> {
     let f = std::fs::File::open(&candidate)?;
-    let results: Vec<zen_bench::run::BenchResult> = serde_json::from_reader(std::io::BufReader::new(f))?;
+    let results: Vec<zen_bench::run::BenchResult> =
+        serde_json::from_reader(std::io::BufReader::new(f))?;
     let md = zen_bench::Leaderboard::render(&results);
     if let Some(parent) = leaderboard.parent() {
         tokio::fs::create_dir_all(parent).await.ok();

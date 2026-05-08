@@ -25,11 +25,20 @@ pub enum Expr {
     Or(Box<Expr>, Box<Expr>),
     Not(Box<Expr>),
     /// `text_match(column, "search")` — full-text predicate.
-    TextMatch { column: String, query: String },
+    TextMatch {
+        column: String,
+        query: String,
+    },
     /// `vector_distance(column, query_vector)` returning a score column.
-    VectorDistance { column: String, query: Vec<f32> },
+    VectorDistance {
+        column: String,
+        query: Vec<f32>,
+    },
     /// `metadata.user_id = 'foo'` etc.
-    JsonPathEq { path: String, value: String },
+    JsonPathEq {
+        path: String,
+        value: String,
+    },
 }
 
 impl Expr {

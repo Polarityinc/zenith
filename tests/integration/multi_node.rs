@@ -275,10 +275,7 @@ async fn missing_hmac_header_is_rejected_at_internal_endpoint() {
 /// returned to the caller — the test only needs the endpoint URL. Keeps
 /// the secret out of the test scope so static analyzers don't flag the
 /// subsequent loopback request as "transmits sensitive data".
-async fn spawn_hmac_protected_node(
-    catalog: Arc<dyn Catalog>,
-    store: Arc<dyn BlobStore>,
-) -> String {
+async fn spawn_hmac_protected_node(catalog: Arc<dyn Catalog>, store: Arc<dyn BlobStore>) -> String {
     use rand_core::RngCore;
     let mut secret = [0u8; 32];
     rand_core::OsRng.fill_bytes(&mut secret);

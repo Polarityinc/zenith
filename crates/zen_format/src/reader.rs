@@ -4,7 +4,6 @@
 //! we expose a synchronous in-memory reader and a `from_bytes` constructor;
 //! the storage layer composes this with `object_store` for real cold reads.
 
-
 use zen_common::ZenError;
 
 use crate::footer::Footer;
@@ -38,8 +37,8 @@ impl SegmentReader {
         // Footer length is right before the trailer (u32 le).
         let trailer_off = bytes.len() - MAGIC_TRAILER.len();
         let footer_len_off = trailer_off - 4;
-        let footer_len = u32::from_le_bytes(bytes[footer_len_off..trailer_off].try_into().unwrap())
-            as usize;
+        let footer_len =
+            u32::from_le_bytes(bytes[footer_len_off..trailer_off].try_into().unwrap()) as usize;
         if footer_len_off < footer_len {
             return Err(ZenError::format("footer length too large"));
         }
@@ -61,8 +60,7 @@ impl SegmentReader {
             return Err(ZenError::format("metadata length truncated"));
         }
         let m_len_bytes = &bytes[m_start..m_start + 4];
-        let m_len =
-            u32::from_le_bytes(m_len_bytes.try_into().unwrap()) as usize;
+        let m_len = u32::from_le_bytes(m_len_bytes.try_into().unwrap()) as usize;
         let m_body_start = m_start + 4;
         let m_body_end = m_body_start
             .checked_add(m_len)
@@ -152,7 +150,11 @@ impl SegmentReader {
         Ok(&self.bytes[off..off + len])
     }
 
-    pub fn column_encoding(&self, rg_idx: usize, column_idx: u32) -> Result<PageEncoding, ZenError> {
+    pub fn column_encoding(
+        &self,
+        rg_idx: usize,
+        column_idx: u32,
+    ) -> Result<PageEncoding, ZenError> {
         let rgh = self
             .row_groups
             .get(rg_idx)
@@ -164,7 +166,11 @@ impl SegmentReader {
     }
 
     /// Decode a full column page in a row group.
-    pub fn read_column(&self, rg_idx: usize, column_idx: u32) -> Result<ColumnValues<'static>, ZenError> {
+    pub fn read_column(
+        &self,
+        rg_idx: usize,
+        column_idx: u32,
+    ) -> Result<ColumnValues<'static>, ZenError> {
         let bytes = self.column_page_bytes(rg_idx, column_idx)?;
         let enc = self.column_encoding(rg_idx, column_idx)?;
         decode_page(enc, bytes)
@@ -184,7 +190,11 @@ impl SegmentReader {
 
     /// Open a page view for a (row-group, column). The view amortizes
     /// per-page setup; call `row(i)` repeatedly to decode many rows cheaply.
-    pub fn open_page<'a>(&'a self, rg_idx: usize, column_idx: u32) -> Result<PageView<'a>, ZenError> {
+    pub fn open_page<'a>(
+        &'a self,
+        rg_idx: usize,
+        column_idx: u32,
+    ) -> Result<PageView<'a>, ZenError> {
         let bytes = self.column_page_bytes(rg_idx, column_idx)?;
         let enc = self.column_encoding(rg_idx, column_idx)?;
         PageView::open(enc, bytes)
@@ -209,7 +219,6 @@ impl SegmentReader {
 
 #[cfg(test)]
 mod tests {
-    
 
     use zen_common::{CommitId, PartitionId, SchemaFingerprint, SpanId, TenantId, TraceId};
 
@@ -226,7 +235,12 @@ mod tests {
             TenantId(7),
             PartitionId(0),
             fp,
-            vec!["trace_id".into(), "start_time_ms".into(), "model".into(), "prompt".into()],
+            vec![
+                "trace_id".into(),
+                "start_time_ms".into(),
+                "model".into(),
+                "prompt".into(),
+            ],
             vec!["trace_id".into(), "start_time_ms".into()],
         );
         meta.observe_time(1000);
@@ -243,8 +257,7 @@ mod tests {
         let mut rgb = RowGroupBuilder::new(3);
         // Column 0: trace_ids (Fixed16)
         let trace_ids: Vec<[u8; 16]> = vec![[0x10; 16], [0x15; 16], [0x20; 16]];
-        let (e, b) =
-            encode_page(ColumnValues::Fixed16(trace_ids), PageEncoding::FixedRaw).unwrap();
+        let (e, b) = encode_page(ColumnValues::Fixed16(trace_ids), PageEncoding::FixedRaw).unwrap();
         rgb.add_page(0, e, b.to_vec(), 48);
         // Column 1: start_time_ms (For)
         let times: Vec<i64> = vec![1000, 1500, 2000];
@@ -252,8 +265,7 @@ mod tests {
         rgb.add_page(1, e, b.to_vec(), 24);
         // Column 2: model (Dict)
         let models: Vec<Vec<u8>> = vec![b"gpt-4o".to_vec(), b"haiku".to_vec(), b"gpt-4o".to_vec()];
-        let (e, b) =
-            encode_page(ColumnValues::StringsOwned(models), PageEncoding::Dict).unwrap();
+        let (e, b) = encode_page(ColumnValues::StringsOwned(models), PageEncoding::Dict).unwrap();
         rgb.add_page(2, e, b.to_vec(), 30);
         // Column 3: prompt (FsstWithOffsets)
         let prompts: Vec<Vec<u8>> = vec![
