@@ -15,7 +15,7 @@ use uuid::Uuid;
 
 use zen_catalog::{
     model::{SegmentRow, WalObjectRow},
-    Catalog, SqliteCatalog,
+    Catalog, MockCatalog,
 };
 use zen_common::{
     CommitId, PartitionId, Schema, SchemaFingerprint, SpanId, SpanRecord, TenantId, TraceId,
@@ -28,7 +28,7 @@ use zen_wal::WalWriter;
 #[tokio::test]
 async fn backup_then_restore_preserves_segments() {
     let store_a: Arc<dyn BlobStore> = Arc::new(InMemoryStore::default());
-    let cat_a: Arc<dyn Catalog> = Arc::new(SqliteCatalog::open_in_memory().await.unwrap());
+    let cat_a: Arc<dyn Catalog> = Arc::new(MockCatalog::new());
     cat_a.ensure_tenant(TenantId(1), "t").await.unwrap();
     cat_a
         .ensure_partition(TenantId(1), PartitionId(0))
@@ -104,7 +104,7 @@ async fn backup_then_restore_preserves_segments() {
 
     // RESTORE — fresh store + catalog, replay the manifest.
     let store_b: Arc<dyn BlobStore> = Arc::new(InMemoryStore::default());
-    let cat_b: Arc<dyn Catalog> = Arc::new(SqliteCatalog::open_in_memory().await.unwrap());
+    let cat_b: Arc<dyn Catalog> = Arc::new(MockCatalog::new());
     cat_b.ensure_tenant(TenantId(1), "t").await.unwrap();
     cat_b
         .ensure_partition(TenantId(1), PartitionId(0))

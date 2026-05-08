@@ -1991,7 +1991,7 @@ mod tests {
     use ulid::Ulid;
     use uuid::Uuid;
 
-    use zen_catalog::{model::WalObjectRow, Catalog, SqliteCatalog};
+    use zen_catalog::{model::WalObjectRow, Catalog, MockCatalog};
     use zen_common::{CommitId, Schema, SchemaFingerprint, SpanId, SpanRecord, TraceId};
     use zen_compactor::compact_partition;
     use zen_memtable::flush_to_record_batch;
@@ -2003,7 +2003,7 @@ mod tests {
 
     async fn setup_indexed_segment() -> (Arc<dyn Catalog>, Arc<dyn BlobStore>) {
         let store: Arc<dyn BlobStore> = Arc::new(InMemoryStore::default());
-        let catalog: Arc<dyn Catalog> = Arc::new(SqliteCatalog::open_in_memory().await.unwrap());
+        let catalog: Arc<dyn Catalog> = Arc::new(MockCatalog::new());
         catalog.ensure_tenant(TenantId(1), "t").await.unwrap();
         catalog
             .ensure_partition(TenantId(1), PartitionId(0))

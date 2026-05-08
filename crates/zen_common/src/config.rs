@@ -142,15 +142,21 @@ impl Default for StorageConfig {
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct CatalogConfig {
-    pub backend: String, // "sqlite" | "postgres"
-    pub sqlite_path: String,
+    /// Catalog backend: `"postgres"` (production) or `"mock"` (in-memory,
+    /// for tests + dev only — does not survive restart).
+    pub backend: String,
+    /// Required when `backend = "postgres"`. Standard libpq URL, e.g.
+    /// `postgres://zen:secret@db.internal:5432/zenith`.
     pub postgres_url: Option<String>,
 }
 impl Default for CatalogConfig {
     fn default() -> Self {
         Self {
-            backend: "sqlite".into(),
-            sqlite_path: "./data/zenith.db".into(),
+            // `mock` is the safer default for `Config::default()` — used
+            // by tests and the in-process integration runs that don't
+            // ship a Postgres URL. Production configs MUST set
+            // `backend = "postgres"` and `postgres_url`.
+            backend: "mock".into(),
             postgres_url: None,
         }
     }
@@ -337,9 +343,6 @@ impl Config {
         if let Ok(v) = std::env::var("ZEN_CATALOG_BACKEND") {
             self.catalog.backend = v;
         }
-        if let Ok(v) = std::env::var("ZEN_SQLITE_PATH") {
-            self.catalog.sqlite_path = v;
-        }
         if let Ok(v) = std::env::var("ZEN_POSTGRES_URL") {
             self.catalog.postgres_url = Some(v);
         }
@@ -358,10 +361,10 @@ impl Config {
             }
         }
         match self.catalog.backend.as_str() {
-            "sqlite" | "postgres" => {}
+            "postgres" | "mock" => {}
             other => {
                 return Err(ZenError::invalid(format!(
-                    "unknown catalog backend: {other}"
+                    "unknown catalog backend: {other} (valid: postgres, mock)"
                 )))
             }
         }
@@ -400,8 +403,7 @@ mod tests {
             nvme_cache_bytes = 1024
 
             [catalog]
-            backend = "sqlite"
-            sqlite_path = "./tmp/zenith.db"
+            backend = "mock"
         "#;
         let cfg = Config::from_toml_str(s).unwrap();
         assert_eq!(cfg.server.listen, "127.0.0.1:50000");
@@ -417,8 +419,7 @@ mod tests {
             nvme_cache_dir = "x"
             nvme_cache_bytes = 1
             [catalog]
-            backend = "sqlite"
-            sqlite_path = "x"
+            backend = "mock"
         "#;
         assert!(Config::from_toml_str(s).is_err());
     }
@@ -428,7 +429,15 @@ mod tests {
         let s = r#"
             [catalog]
             backend = "postgres"
-            sqlite_path = "x"
+        "#;
+        assert!(Config::from_toml_str(s).is_err());
+    }
+
+    #[test]
+    fn rejects_sqlite_backend() {
+        let s = r#"
+            [catalog]
+            backend = "sqlite"
         "#;
         assert!(Config::from_toml_str(s).is_err());
     }

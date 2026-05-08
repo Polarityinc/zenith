@@ -49,7 +49,7 @@ Everything else is supporting infrastructure.
 - **Vector search** — HNSW + optional quantization, OpenAI/Anthropic embedding sizes out of the box.
 - **JSON-path indexing** — bitmap posting lists over the hottest paths, sampled per segment.
 - **Compression** — FSST + ZSTD on strings, Gorilla XOR on floats, FoR/RLE on integers, dictionary on low-card columns.
-- **Storage backends** — local FS, S3, GCS, Azure Blob; SQLite or Postgres catalog.
+- **Storage backends** — local FS, S3, GCS, Azure Blob; PostgreSQL catalog (with `MockCatalog` in-memory backend for tests).
 - **Ops, day one** — JWT auth, TLS termination (rustls + aws-lc-rs), Prometheus metrics, OTLP tracing, per-tenant rate limits, graceful shutdown, snapshot/restore CLI.
 - **Encryption at rest** — AES-256-GCM envelope encryption, pluggable KMS root key.
 - **Cluster** — rendezvous-hash sharded, transparent query routing, 3-node integration test in CI.
@@ -68,7 +68,7 @@ git clone https://github.com/Polarityinc/zenith.git
 cd zenithdb
 cargo build --release
 
-# Default profile: SQLite catalog + local-FS object store. No Docker required.
+# Default profile: in-memory `MockCatalog` + local-FS object store. No Docker required.
 cargo run --release -p zen_cli -- serve --config examples/zenithdb.dev.toml
 ```
 
@@ -135,7 +135,7 @@ Clients (SDKs, OTLP, REST, gRPC)
    (memtable)   (planner + exec)
         │           │
         ▼           ▼
-   Catalog (sqlite / Postgres)
+   Catalog (Postgres)
         │
         ▼
   Object storage (local-fs / S3 / GCS / Azure)
@@ -177,7 +177,7 @@ ZenithDB ships with the operational primitives needed to run on real infrastruct
 
 The default profile runs entirely on your laptop with no external services:
 
-- **Catalog** — SQLite at `./data/zenith.db`
+- **Catalog** — Postgres (production) or in-memory `MockCatalog` (dev/test, set in config)
 - **Object store** — local filesystem at `./data/blobs/`
 - **NVMe page cache** — in-process, default 4 GiB
 

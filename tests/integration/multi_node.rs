@@ -20,7 +20,7 @@ use chrono::Utc;
 use tokio::net::TcpListener;
 use uuid::Uuid;
 
-use zen_catalog::{model::WalObjectRow, Catalog, SqliteCatalog};
+use zen_catalog::{model::WalObjectRow, Catalog, MockCatalog};
 use zen_cluster::{NodeId, NodeRegistry, NodeRole};
 use zen_common::{
     CommitId, Config, PartitionId, Schema, SchemaFingerprint, SpanId, SpanRecord, TenantId, TraceId,
@@ -138,7 +138,7 @@ async fn spawn_node_with_secret(
 #[tokio::test]
 async fn three_node_cluster_serves_queries_from_any_node() {
     let store: Arc<dyn BlobStore> = Arc::new(InMemoryStore::default());
-    let catalog: Arc<dyn Catalog> = Arc::new(SqliteCatalog::open_in_memory().await.unwrap());
+    let catalog: Arc<dyn Catalog> = Arc::new(MockCatalog::new());
 
     seed_data(catalog.clone(), store.clone()).await;
 
@@ -200,7 +200,7 @@ async fn three_node_cluster_serves_queries_from_any_node() {
 #[tokio::test]
 async fn three_node_cluster_with_hmac_inter_node_auth() {
     let store: Arc<dyn BlobStore> = Arc::new(InMemoryStore::default());
-    let catalog: Arc<dyn Catalog> = Arc::new(SqliteCatalog::open_in_memory().await.unwrap());
+    let catalog: Arc<dyn Catalog> = Arc::new(MockCatalog::new());
 
     seed_data(catalog.clone(), store.clone()).await;
 
@@ -253,7 +253,7 @@ async fn three_node_cluster_with_hmac_inter_node_auth() {
 #[tokio::test]
 async fn missing_hmac_header_is_rejected_at_internal_endpoint() {
     let store: Arc<dyn BlobStore> = Arc::new(InMemoryStore::default());
-    let catalog: Arc<dyn Catalog> = Arc::new(SqliteCatalog::open_in_memory().await.unwrap());
+    let catalog: Arc<dyn Catalog> = Arc::new(MockCatalog::new());
 
     let endpoint = spawn_hmac_protected_node(catalog, store).await;
 

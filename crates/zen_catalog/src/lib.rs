@@ -1,13 +1,21 @@
 //! Catalog: tiny metadata store. Tracks segments, WAL objects, commit IDs,
-//! compaction leases. Lives outside the segment data — segments hold the
-//! truth, the catalog is a fast index.
+//! compaction leases, cluster nodes. Lives outside the segment data —
+//! segments hold the truth, the catalog is a fast index.
 //!
-//! Default backend is sqlite (zero-install). Postgres available behind a
-//! feature flag for prod-like deployments.
+//! # Backends
+//!
+//! - **`PostgresCatalog`** — the production backend. Multi-node safe,
+//!   replicated, MVCC-isolated. Provisioned via RDS / Cloud SQL /
+//!   self-managed Postgres 14+. Required for clustered deployments.
+//! - **`MockCatalog`** — in-memory, no SQL, for tests and benches. Same
+//!   trait, same semantics; not suitable for production.
+//!
+//! SQLite was the original dev backend and has been removed in favour
+//! of `MockCatalog` for tests + Postgres for everything else. See the
+//! CHANGELOG for the migration note.
 
-pub mod sqlite;
+pub mod mock;
 pub mod model;
-#[cfg(feature = "catalog-postgres")]
 pub mod postgres;
 
 use std::sync::Arc;
@@ -17,8 +25,9 @@ use chrono::{DateTime, Utc};
 
 use zen_common::{CommitId, Config, PartitionId, TenantId, ZenError, ZenResult};
 
+pub use mock::MockCatalog;
 pub use model::*;
-pub use sqlite::SqliteCatalog;
+pub use postgres::PostgresCatalog;
 
 /// All operations the engine needs from a catalog.
 #[async_trait]
@@ -105,26 +114,22 @@ pub trait Catalog: Send + Sync + 'static {
     async fn list_nodes(&self) -> ZenResult<Vec<NodeRow>>;
 }
 
+/// Open a `Catalog` from config. `postgres` is the production backend;
+/// `mock` is in-memory for benches / dev.
 pub async fn open_catalog(cfg: &Config) -> ZenResult<Arc<dyn Catalog>> {
     match cfg.catalog.backend.as_str() {
-        "sqlite" => {
-            let cat = SqliteCatalog::open(&cfg.catalog.sqlite_path).await?;
-            Ok(Arc::new(cat))
-        }
-        #[cfg(feature = "catalog-postgres")]
         "postgres" => {
-            let url = cfg
-                .catalog
-                .postgres_url
-                .as_deref()
-                .ok_or_else(|| ZenError::catalog("postgres_url missing"))?;
-            let cat = postgres::PostgresCatalog::open(url).await?;
+            let url = cfg.catalog.postgres_url.as_deref().ok_or_else(|| {
+                ZenError::catalog(
+                    "catalog.postgres_url is required (set ZEN_POSTGRES_URL or catalog.postgres_url in config)",
+                )
+            })?;
+            let cat = PostgresCatalog::open(url).await?;
             Ok(Arc::new(cat))
         }
-        #[cfg(not(feature = "catalog-postgres"))]
-        "postgres" => Err(ZenError::catalog(
-            "postgres backend requires `catalog-postgres` feature",
-        )),
-        other => Err(ZenError::catalog(format!("unknown catalog backend: {other}"))),
+        "mock" => Ok(Arc::new(MockCatalog::new())),
+        other => Err(ZenError::catalog(format!(
+            "unknown catalog backend: {other} (valid: postgres, mock)"
+        ))),
     }
 }
