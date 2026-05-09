@@ -134,3 +134,151 @@ fn push_opt_f64(b: &mut arrow_array::builder::Float64Builder, v: Option<f64>) {
         None => b.append_null(),
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    use std::io::Cursor;
+
+    use arrow_ipc::reader::StreamReader;
+    use arrow_ipc::writer::StreamWriter;
+    use proptest::prelude::*;
+
+    use zen_common::{CommitId, PartitionId, SpanId, TenantId, TraceId};
+
+    fn record_with_seed(seed: u64) -> SpanRecord {
+        let mut r = SpanRecord::new(TenantId(1), PartitionId(0));
+        // Deterministic identifiers so tests don't depend on system clock /
+        // ulid randomness.
+        r.trace_id = TraceId([(seed & 0xff) as u8; 16]);
+        r.span_id = SpanId([((seed >> 8) & 0xff) as u8; 16]);
+        r.parent_span_id = if seed % 2 == 0 {
+            None
+        } else {
+            Some(SpanId([((seed >> 16) & 0xff) as u8; 16]))
+        };
+        r.start_time_ms = (seed % 1_000_000) as i64;
+        r.end_time_ms = r.start_time_ms + 100;
+        r.duration_ms = 100;
+        r.span_type = Some("llm_call".into());
+        r.status = Some("ok".into());
+        r.provider = Some("openai".into());
+        r.model = Some("gpt-4o".into());
+        r.tool_name = None;
+        r.prompt = Some(format!("prompt-{seed}"));
+        r.completion = Some(format!("completion-{seed}"));
+        r.prompt_tokens = Some(((seed % 1000) as u32) + 1);
+        r.completion_tokens = Some(((seed % 500) as u32) + 1);
+        r.cost_usd = Some(0.01_f64 * (seed as f64));
+        r.temperature = Some(0.7);
+        r.top_p = Some(0.95);
+        r.tool_io_text = None;
+        r.user_id = Some(format!("user-{}", seed % 7));
+        r.session_id = Some(format!("sess-{}", seed % 13));
+        r.request_id = Some(format!("req-{seed}"));
+        r.metadata = Some(serde_json::json!({ "k": seed }));
+        r.commit_id = CommitId(seed);
+        r
+    }
+
+    #[test]
+    fn flush_to_record_batch_100_rows_has_expected_schema() {
+        let rows: Vec<SpanRecord> = (0..100u64).map(record_with_seed).collect();
+        let batch = flush_to_record_batch(&rows).unwrap();
+        assert_eq!(batch.num_rows(), 100, "100 rows expected");
+        // Match the canonical Arrow schema bit-for-bit.
+        let want = spans_arrow_schema();
+        assert_eq!(batch.schema().fields(), want.fields());
+        assert_eq!(batch.num_columns(), want.fields().len());
+    }
+
+    #[test]
+    fn flush_to_record_batch_empty_returns_zero_row_batch() {
+        // The implementation does not flag empty as an error; it returns a
+        // valid 0-row RecordBatch with the canonical schema. We pin that.
+        let batch = flush_to_record_batch(&[]).unwrap();
+        assert_eq!(batch.num_rows(), 0);
+        let want = spans_arrow_schema();
+        assert_eq!(batch.schema().fields(), want.fields());
+    }
+
+    #[test]
+    fn flush_to_record_batch_handles_all_optional_nulls() {
+        // Append a row with every Option field as None — must not panic and
+        // must produce nullable columns at index N=0.
+        let r = SpanRecord::new(TenantId(2), PartitionId(1));
+        let batch = flush_to_record_batch(&[r]).unwrap();
+        assert_eq!(batch.num_rows(), 1);
+        // Column "parent_span_id" at index 4 should be all-null.
+        let parent = batch.column(4);
+        assert_eq!(parent.null_count(), 1);
+    }
+
+    fn arb_record() -> impl Strategy<Value = SpanRecord> {
+        // A small but representative shape: vary identity + payload sizes,
+        // include a mixture of Some/None across the optional columns.
+        (
+            any::<u64>(), // tenant
+            any::<u32>(), // partition
+            any::<[u8; 16]>(),
+            any::<[u8; 16]>(),
+            proptest::option::of(any::<[u8; 16]>()),
+            any::<i64>(),
+            any::<i64>(),
+            proptest::option::of(".*"),
+            proptest::option::of(any::<u32>()),
+            proptest::option::of(any::<f64>()),
+        )
+            .prop_map(
+                |(tenant, partition, t, sp, parent, st, et, prompt, ptok, cost)| {
+                    let mut r = SpanRecord::new(TenantId(tenant), PartitionId(partition));
+                    r.trace_id = TraceId(t);
+                    r.span_id = SpanId(sp);
+                    r.parent_span_id = parent.map(SpanId);
+                    r.start_time_ms = st;
+                    r.end_time_ms = et;
+                    r.duration_ms = et.wrapping_sub(st);
+                    r.prompt = prompt;
+                    r.prompt_tokens = ptok;
+                    // f64::NaN through Arrow IPC is a valid bit-pattern; only
+                    // disallow signaling NaNs and infinities to keep the
+                    // round-trip equality check sane.
+                    r.cost_usd = cost.filter(|x| x.is_finite());
+                    r
+                },
+            )
+    }
+
+    proptest! {
+        /// Encode a random batch of records into an Arrow RecordBatch, push
+        /// it through the Arrow IPC stream codec, and assert that we can
+        /// read it back with the same row + column counts. Catches schema
+        /// drift, builder/array length mismatches, and IPC framing bugs in
+        /// downstream consumers (the WAL writer uses the same code path).
+        #[test]
+        fn roundtrip_arrow_ipc(records in proptest::collection::vec(arb_record(), 1..200)) {
+            let batch = flush_to_record_batch(&records).unwrap();
+            prop_assert_eq!(batch.num_rows(), records.len());
+
+            let mut buf: Vec<u8> = Vec::new();
+            {
+                let mut w = StreamWriter::try_new(Cursor::new(&mut buf), batch.schema().as_ref())
+                    .expect("stream writer");
+                w.write(&batch).expect("write");
+                w.finish().expect("finish");
+            }
+
+            let r = StreamReader::try_new(Cursor::new(&buf), None).expect("reader");
+            let mut rows = 0usize;
+            let mut got_cols = 0usize;
+            for b in r {
+                let b = b.expect("batch");
+                rows += b.num_rows();
+                got_cols = b.num_columns();
+            }
+            prop_assert_eq!(rows, records.len());
+            prop_assert_eq!(got_cols, batch.num_columns());
+        }
+    }
+}

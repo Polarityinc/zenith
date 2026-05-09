@@ -35,6 +35,7 @@ fn has_empty_time_range(plan: &LogicalPlan) -> bool {
     plan.time_min_ms > plan.time_max_ms
 }
 
+#[allow(clippy::field_reassign_with_default)]
 fn empty_result_set(plan: &LogicalPlan, start: Instant) -> ResultSet {
     let mut stats = ResultStats::default();
     stats.elapsed_ms = start.elapsed().as_millis() as u64;
@@ -348,6 +349,7 @@ pub async fn execute_full(
     })
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn scan_one_segment(
     seg: &SegmentRow,
     store: Arc<dyn BlobStore>,
@@ -554,6 +556,7 @@ fn wal_object_might_match(
             return false;
         }
     }
+    #[allow(clippy::collapsible_if)]
     if plan.time_min_ms != i64::MIN || plan.time_max_ms != i64::MAX {
         if wal.time_max < plan.time_min_ms || wal.time_min > plan.time_max_ms {
             return false;

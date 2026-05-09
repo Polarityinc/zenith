@@ -24,6 +24,7 @@ bytes = "1"
 rand_core = { version = "0.6", features = ["std"] }
 chrono = { version = "0.4", features = ["serde"] }
 uuid = { version = "1", features = ["v4"] }
+sqlx = { version = "0.8", default-features = false, features = ["postgres", "runtime-tokio", "tls-rustls-aws-lc-rs", "macros"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 reqwest = { version = "0.12", features = ["json"] }
@@ -61,3 +62,11 @@ path = "backup_restore.rs"
 [[test]]
 name = "openapi_smoke"
 path = "openapi_smoke.rs"
+
+[[test]]
+name = "multi_tenant_isolation"
+path = "multi_tenant_isolation.rs"
+
+[[test]]
+name = "postgres_catalog"
+path = "postgres_catalog.rs"

@@ -178,6 +178,11 @@ fn select_wal_batch(wals: &[WalObjectRow]) -> &[WalObjectRow] {
     let mut bytes = 0i64;
     let mut rows = 0i64;
     for w in wals {
+        // Both target constants are positive; the `> 0` clauses defend
+        // against future negative tunings (e.g. signedness oversight).
+        // Clippy flags them as redundant under current values; suppress
+        // the lint here so the defensive guard stays.
+        #[allow(clippy::collapsible_if, clippy::redundant_comparisons)]
         if end > 0
             && ((bytes > 0 && bytes >= WAL_COMPACTION_TARGET_BYTES)
                 || (rows > 0 && rows >= WAL_COMPACTION_TARGET_ROWS))
@@ -225,6 +230,7 @@ pub async fn compact_full(
     .await
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn compact_full_with_options(
     catalog: Arc<dyn Catalog>,
     store: Arc<dyn BlobStore>,
@@ -301,6 +307,7 @@ async fn compact_full_with_options(
     let mut rows_compacted = 0u64;
     let mut segment_bytes_total = 0u64;
 
+    #[allow(clippy::while_let_on_iterator)]
     while let Some(row) = merge.next() {
         if (batch.len() >= max_segment_rows || batch_estimated_bytes >= max_segment_bytes)
             && last_trace_id.is_some_and(|tid| tid != row.trace_id.0)
@@ -399,6 +406,7 @@ async fn compact_full_with_options(
     })
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn publish_compacted_segment(
     catalog: Arc<dyn Catalog>,
     store: Arc<dyn BlobStore>,
