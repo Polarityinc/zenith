@@ -6,7 +6,7 @@ use axum::{extract::State, http::StatusCode, Extension, Json};
 use serde::{Deserialize, Serialize};
 
 use zen_auth::Claims;
-use zen_catalog::model::WalObjectRow;
+use zen_catalog::model::{WalObjectBounds, WalObjectRow};
 use zen_common::{CommitId, PartitionId, Schema, SpanId, SpanRecord, TenantId, TraceId};
 use zen_wal::WalWriter;
 
@@ -213,14 +213,15 @@ async fn handle_ingest_inner(
         .collect();
 
     // Append to memtable.
+    let wal_bounds = WalObjectBounds::from_span_records(&records);
     let mt = state.memtable_for(tenant, partition);
     mt.append_many(records);
 
     // Synchronously flush to WAL.
     let batch = mt.flush().map_err(http_err)?;
     let writer = WalWriter::new(state.store.clone());
-    let key = writer
-        .flush(
+    let (key, wal_bytes) = writer
+        .flush_with_size(
             tenant,
             partition,
             commit_id,
@@ -239,8 +240,12 @@ async fn handle_ingest_inner(
             object_key: key.to_string(),
             commit_id_min: commit_id,
             commit_id_max: CommitId(commit_id.0 + n as u64 - 1),
-            byte_count: 0,
+            byte_count: wal_bytes as i64,
             row_count: n as i64,
+            time_min: wal_bounds.time_min,
+            time_max: wal_bounds.time_max,
+            trace_id_min: wal_bounds.trace_id_min,
+            trace_id_max: wal_bounds.trace_id_max,
             schema_fingerprint: Schema::spans_v1().fingerprint(),
             consumed_at: None,
             created_at: chrono::Utc::now(),

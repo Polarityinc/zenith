@@ -71,21 +71,26 @@ fn segment_from_row(r: &PgRow) -> ZenResult<SegmentRow> {
     Ok(SegmentRow {
         segment_id,
         tenant_id: TenantId(r.try_get::<i64, _>("tenant_id").map_err(catalog_err)? as u64),
-        partition_id: PartitionId(
-            r.try_get::<i64, _>("partition_id").map_err(catalog_err)? as u32,
-        ),
+        partition_id: PartitionId(r.try_get::<i64, _>("partition_id").map_err(catalog_err)? as u32),
         object_key: r.try_get("object_key").map_err(catalog_err)?,
         level: r.try_get::<i16, _>("level").map_err(catalog_err)?,
         byte_count: r.try_get("byte_count").map_err(catalog_err)?,
         row_count: r.try_get("row_count").map_err(catalog_err)?,
         time_min: r.try_get("time_min").map_err(catalog_err)?,
         time_max: r.try_get("time_max").map_err(catalog_err)?,
-        trace_id_min: trace_from_bytes(&r.try_get::<Vec<u8>, _>("trace_id_min").map_err(catalog_err)?)?,
-        trace_id_max: trace_from_bytes(&r.try_get::<Vec<u8>, _>("trace_id_max").map_err(catalog_err)?)?,
+        trace_id_min: trace_from_bytes(
+            &r.try_get::<Vec<u8>, _>("trace_id_min")
+                .map_err(catalog_err)?,
+        )?,
+        trace_id_max: trace_from_bytes(
+            &r.try_get::<Vec<u8>, _>("trace_id_max")
+                .map_err(catalog_err)?,
+        )?,
         commit_id_min: CommitId(r.try_get::<i64, _>("commit_id_min").map_err(catalog_err)? as u64),
         commit_id_max: CommitId(r.try_get::<i64, _>("commit_id_max").map_err(catalog_err)? as u64),
         schema_fingerprint: fp_from_bytes(
-            &r.try_get::<Vec<u8>, _>("schema_fingerprint").map_err(catalog_err)?,
+            &r.try_get::<Vec<u8>, _>("schema_fingerprint")
+                .map_err(catalog_err)?,
         ),
         rowgroup_index: r.try_get("rowgroup_index").map_err(catalog_err)?,
         superseded_at: r.try_get("superseded_at").map_err(catalog_err)?,
@@ -148,8 +153,9 @@ impl Catalog for PostgresCatalog {
             "INSERT INTO wal_objects (
                wal_id, tenant_id, partition_id, object_key,
                commit_id_min, commit_id_max, byte_count, row_count,
+               time_min, time_max, trace_id_min, trace_id_max,
                schema_fingerprint, consumed_at, created_at
-             ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)",
+             ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15)",
         )
         .bind(w.wal_id.as_bytes().to_vec())
         .bind(w.tenant_id.0 as i64)
@@ -159,6 +165,10 @@ impl Catalog for PostgresCatalog {
         .bind(w.commit_id_max.0 as i64)
         .bind(w.byte_count)
         .bind(w.row_count)
+        .bind(w.time_min)
+        .bind(w.time_max)
+        .bind(w.trace_id_min.0.to_vec())
+        .bind(w.trace_id_max.0.to_vec())
         .bind(fp_to_bytes(w.schema_fingerprint))
         .bind(w.consumed_at)
         .bind(w.created_at)
@@ -177,6 +187,7 @@ impl Catalog for PostgresCatalog {
         let rows = sqlx::query(
             "SELECT wal_id, tenant_id, partition_id, object_key,
                     commit_id_min, commit_id_max, byte_count, row_count,
+                    time_min, time_max, trace_id_min, trace_id_max,
                     schema_fingerprint, consumed_at, created_at
              FROM wal_objects
              WHERE tenant_id=$1 AND partition_id=$2
@@ -202,15 +213,26 @@ impl Catalog for PostgresCatalog {
                 ),
                 object_key: r.try_get("object_key").map_err(catalog_err)?,
                 commit_id_min: CommitId(
-                    r.try_get::<i64, _>("commit_id_min").map_err(catalog_err)? as u64,
+                    r.try_get::<i64, _>("commit_id_min").map_err(catalog_err)? as u64
                 ),
                 commit_id_max: CommitId(
-                    r.try_get::<i64, _>("commit_id_max").map_err(catalog_err)? as u64,
+                    r.try_get::<i64, _>("commit_id_max").map_err(catalog_err)? as u64
                 ),
                 byte_count: r.try_get("byte_count").map_err(catalog_err)?,
                 row_count: r.try_get("row_count").map_err(catalog_err)?,
+                time_min: r.try_get("time_min").map_err(catalog_err)?,
+                time_max: r.try_get("time_max").map_err(catalog_err)?,
+                trace_id_min: trace_from_bytes(
+                    &r.try_get::<Vec<u8>, _>("trace_id_min")
+                        .map_err(catalog_err)?,
+                )?,
+                trace_id_max: trace_from_bytes(
+                    &r.try_get::<Vec<u8>, _>("trace_id_max")
+                        .map_err(catalog_err)?,
+                )?,
                 schema_fingerprint: fp_from_bytes(
-                    &r.try_get::<Vec<u8>, _>("schema_fingerprint").map_err(catalog_err)?,
+                    &r.try_get::<Vec<u8>, _>("schema_fingerprint")
+                        .map_err(catalog_err)?,
                 ),
                 consumed_at: r.try_get("consumed_at").map_err(catalog_err)?,
                 created_at: r.try_get("created_at").map_err(catalog_err)?,
@@ -441,12 +463,11 @@ impl Catalog for PostgresCatalog {
     }
 
     async fn list_nodes(&self) -> ZenResult<Vec<NodeRow>> {
-        let rows = sqlx::query(
-            "SELECT node_id, endpoint, role, shards, last_heartbeat_ms FROM nodes",
-        )
-        .fetch_all(&self.pool)
-        .await
-        .map_err(|e| ZenError::catalog(format!("list_nodes: {e}")))?;
+        let rows =
+            sqlx::query("SELECT node_id, endpoint, role, shards, last_heartbeat_ms FROM nodes")
+                .fetch_all(&self.pool)
+                .await
+                .map_err(|e| ZenError::catalog(format!("list_nodes: {e}")))?;
         let mut out = Vec::with_capacity(rows.len());
         for r in rows {
             let node_id_bytes: Vec<u8> = r.try_get("node_id").map_err(catalog_err)?;

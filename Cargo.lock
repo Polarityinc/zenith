@@ -5854,9 +5854,12 @@ dependencies = [
  "zen_common",
  "zen_compactor",
  "zen_format",
+ "zen_index",
+ "zen_memtable",
  "zen_ql",
  "zen_query",
  "zen_storage",
+ "zen_wal",
 ]
 
 [[package]]

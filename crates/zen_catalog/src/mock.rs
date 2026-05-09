@@ -275,14 +275,21 @@ mod tests {
     #[tokio::test]
     async fn next_commit_id_monotonic_concurrent() {
         let c = Arc::new(MockCatalog::new());
-        c.ensure_partition(TenantId(1), PartitionId(0)).await.unwrap();
+        c.ensure_partition(TenantId(1), PartitionId(0))
+            .await
+            .unwrap();
         let mut handles = Vec::new();
         for _ in 0..16 {
             let c2 = c.clone();
             handles.push(tokio::spawn(async move {
                 let mut out = Vec::new();
                 for _ in 0..32 {
-                    out.push(c2.next_commit_id(TenantId(1), PartitionId(0)).await.unwrap().0);
+                    out.push(
+                        c2.next_commit_id(TenantId(1), PartitionId(0))
+                            .await
+                            .unwrap()
+                            .0,
+                    );
                 }
                 out
             }));
@@ -301,7 +308,9 @@ mod tests {
     async fn segment_register_list_in_range() {
         let c = MockCatalog::new();
         c.ensure_tenant(TenantId(1), "x").await.unwrap();
-        c.ensure_partition(TenantId(1), PartitionId(0)).await.unwrap();
+        c.ensure_partition(TenantId(1), PartitionId(0))
+            .await
+            .unwrap();
         c.register_segment(SegmentRow {
             segment_id: uuid::Uuid::new_v4(),
             tenant_id: TenantId(1),

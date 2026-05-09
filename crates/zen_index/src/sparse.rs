@@ -52,6 +52,40 @@ impl SparseRowGroupIndex {
             .collect()
     }
 
+    pub fn hits_from_serialized(
+        input: &[u8],
+        trace_id: Option<&[u8; 16]>,
+        time_range: Option<(i64, i64)>,
+    ) -> Result<(Vec<usize>, usize), ZenError> {
+        if input.len() < 4 {
+            return Err(ZenError::format("sparse index header truncated"));
+        }
+        let mut p = input;
+        let n = p.get_u32_le() as usize;
+        let mut hits = Vec::new();
+        for i in 0..n {
+            if p.remaining() < 64 {
+                return Err(ZenError::format("sparse index entry truncated"));
+            }
+            let min_trace_id = &p[..16];
+            p.advance(16);
+            let max_trace_id = &p[..16];
+            p.advance(16);
+            let min_start_time = p.get_i64_le();
+            let max_start_time = p.get_i64_le();
+            p.advance(16);
+
+            let trace_match =
+                trace_id.is_none_or(|tid| min_trace_id <= &tid[..] && &tid[..] <= max_trace_id);
+            let time_match =
+                time_range.is_none_or(|(lo, hi)| max_start_time >= lo && min_start_time <= hi);
+            if trace_match && time_match {
+                hits.push(i);
+            }
+        }
+        Ok((hits, n))
+    }
+
     pub fn serialize(&self) -> Result<Bytes, ZenError> {
         let mut out = BytesMut::with_capacity(self.entries.len() * 64);
         out.put_u32_le(self.entries.len() as u32);
@@ -155,5 +189,22 @@ mod tests {
         let bytes = idx.serialize().unwrap();
         let idx2 = SparseRowGroupIndex::deserialize(&bytes).unwrap();
         assert_eq!(idx.entries, idx2.entries);
+    }
+
+    #[test]
+    fn serialized_hits_apply_trace_and_time_without_deserialize() {
+        let mut idx = SparseRowGroupIndex::new();
+        idx.push(k(0, 1, 1000, 2000));
+        idx.push(k(2, 3, 3000, 4000));
+        idx.push(k(3, 4, 5000, 6000));
+        let bytes = idx.serialize().unwrap();
+
+        let mut tid = [0u8; 16];
+        tid[0] = 3;
+        let (hits, total) =
+            SparseRowGroupIndex::hits_from_serialized(&bytes, Some(&tid), Some((3500, 5500)))
+                .unwrap();
+        assert_eq!(total, 3);
+        assert_eq!(hits, vec![1, 2]);
     }
 }

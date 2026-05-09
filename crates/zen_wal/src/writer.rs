@@ -33,19 +33,33 @@ impl WalWriter {
         schema_fingerprint: SchemaFingerprint,
         batch: &RecordBatch,
     ) -> ZenResult<WalObjectKey> {
+        self.flush_with_size(tenant, partition, commit_id, schema_fingerprint, batch)
+            .await
+            .map(|(key, _)| key)
+    }
+
+    pub async fn flush_with_size(
+        &self,
+        tenant: TenantId,
+        partition: PartitionId,
+        commit_id: CommitId,
+        schema_fingerprint: SchemaFingerprint,
+        batch: &RecordBatch,
+    ) -> ZenResult<(WalObjectKey, usize)> {
         let payload_zstd = encode_batch_to_zstd(batch)?;
         let header = WalHeader {
             commit_id,
             schema_fingerprint,
         };
         let object_bytes = build_wal_object(header, payload_zstd)?;
+        let object_len = object_bytes.len();
         let key = WalObjectKey::new(tenant, partition, commit_id);
         let path = key.to_string();
         let ok = self.store.put_if_absent(&path, object_bytes).await?;
         if !ok {
             return Err(ZenError::conflict(format!("wal object exists: {path}")));
         }
-        Ok(key)
+        Ok((key, object_len))
     }
 }
 

@@ -14,18 +14,26 @@ use std::time::{Duration, Instant};
 
 use bytes::Bytes;
 use chrono::Utc;
-use zen_catalog::{model::SegmentRow, Catalog, MockCatalog};
+use zen_catalog::{
+    model::{SegmentRow, WalObjectBounds, WalObjectRow},
+    Catalog, MockCatalog,
+};
 use zen_common::{CommitId, PartitionId, Schema, SpanId, SpanRecord, TenantId, TraceId};
 use zen_compactor::{build_segment_from_rows, BuildOptions};
+use zen_index::sparse::{RowGroupKey, SparseRowGroupIndex};
+use zen_memtable::flush_to_record_batch;
 use zen_query::{SegmentCache, SegmentListCache};
 use zen_storage::local_fs::InMemoryStore;
 use zen_storage::BlobStore;
+use zen_wal::WalWriter;
 
 #[derive(Clone, Debug)]
 struct Args {
     rows: usize,
     segment_rows: usize,
     row_group_rows: u32,
+    wal_objects: usize,
+    wal_rows: usize,
     iters: usize,
     mode: String,
 }
@@ -36,6 +44,8 @@ impl Default for Args {
             rows: 100_000,
             segment_rows: 50_000,
             row_group_rows: 16_384,
+            wal_objects: 0,
+            wal_rows: 1_000,
             iters: 30,
             mode: "hot".into(),
         }
@@ -47,8 +57,14 @@ struct BuiltCorpus {
     catalog: Arc<dyn Catalog>,
     store: Arc<dyn BlobStore>,
     trace_id: String,
+    time_lo: i64,
+    time_hi: i64,
+    wal_time_lo: Option<i64>,
+    wal_time_hi: Option<i64>,
     segments: usize,
+    wal_objects: usize,
     bytes: usize,
+    wal_bytes: usize,
 }
 
 #[tokio::main(flavor = "multi_thread")]
@@ -58,10 +74,12 @@ async fn main() -> anyhow::Result<()> {
     let corpus = build_corpus(&args).await?;
 
     println!(
-        "# rows={} segments={} bytes_mb={:.1} build_ms={} row_group_rows={} segment_rows={}",
+        "# rows={} segments={} bytes_mb={:.1} wal_objects={} wal_mb={:.1} build_ms={} row_group_rows={} segment_rows={}",
         args.rows,
         corpus.segments,
         corpus.bytes as f64 / 1_048_576.0,
+        corpus.wal_objects,
+        corpus.wal_bytes as f64 / 1_048_576.0,
         build_start.elapsed().as_millis(),
         args.row_group_rows,
         args.segment_rows,
@@ -94,6 +112,8 @@ fn parse_args() -> anyhow::Result<Args> {
             "--rows" => args.rows = value.parse()?,
             "--segment-rows" => args.segment_rows = value.parse()?,
             "--row-group-rows" => args.row_group_rows = value.parse()?,
+            "--wal-objects" => args.wal_objects = value.parse()?,
+            "--wal-rows" => args.wal_rows = value.parse()?,
             "--iters" => args.iters = value.parse()?,
             "--mode" => args.mode = value,
             other => anyhow::bail!("unknown argument {other}"),
@@ -108,6 +128,9 @@ fn parse_args() -> anyhow::Result<Args> {
     if args.row_group_rows == 0 {
         anyhow::bail!("--row-group-rows must be > 0");
     }
+    if args.wal_objects > 0 && args.wal_rows == 0 {
+        anyhow::bail!("--wal-rows must be > 0 when --wal-objects is set");
+    }
     Ok(args)
 }
 
@@ -116,12 +139,14 @@ async fn build_corpus(args: &Args) -> anyhow::Result<BuiltCorpus> {
     let partition = PartitionId(0);
     let schema = Schema::spans_v1();
     let store: Arc<dyn BlobStore> = Arc::new(InMemoryStore::default());
-    let catalog: Arc<dyn Catalog> = Arc::new(Ok::<_,zen_common::ZenError>(MockCatalog::new())?);
+    let catalog: Arc<dyn Catalog> = Arc::new(Ok::<_, zen_common::ZenError>(MockCatalog::new())?);
     catalog.ensure_tenant(tenant, "bench").await?;
     catalog.ensure_partition(tenant, partition).await?;
 
     let rows = generate_rows(args.rows);
     let trace_id = rows[rows.len() / 2].trace_id.to_string();
+    let time_lo = rows[rows.len() / 2].start_time_ms;
+    let time_hi = time_lo + 10_000;
     let build_opts = BuildOptions {
         row_group_max_rows: args.row_group_rows,
         row_group_max_bytes: 64 * 1024 * 1024,
@@ -133,6 +158,7 @@ async fn build_corpus(args: &Args) -> anyhow::Result<BuiltCorpus> {
         let (bytes, _) = build_segment_from_rows(chunk, tenant, partition, &schema, &build_opts)?;
         let reader = zen_format::SegmentReader::from_bytes(bytes.clone())?;
         let meta = reader.metadata.clone();
+        let rowgroup_index = sparse_rowgroup_index(&reader)?;
         let key = format!("bench/segment-{idx:06}.zseg");
         let segment_byte_count = bytes.len();
         total_bytes += segment_byte_count;
@@ -153,7 +179,7 @@ async fn build_corpus(args: &Args) -> anyhow::Result<BuiltCorpus> {
                 commit_id_min: meta.commit_id_min,
                 commit_id_max: meta.commit_id_max,
                 schema_fingerprint: meta.schema_fingerprint,
-                rowgroup_index: Vec::new(),
+                rowgroup_index,
                 superseded_at: None,
                 created_at: Utc::now(),
             })
@@ -161,16 +187,136 @@ async fn build_corpus(args: &Args) -> anyhow::Result<BuiltCorpus> {
         segments += 1;
     }
 
+    let mut wal_bytes = 0usize;
+    let mut wal_time_lo = None;
+    let mut wal_time_hi = None;
+    if args.wal_objects > 0 {
+        let writer = WalWriter::new(store.clone());
+        let wal_rows_total = args.wal_objects.saturating_mul(args.wal_rows);
+        let wal_rows = generate_rows_from(
+            wal_rows_total,
+            args.rows as u128 + 1,
+            1_800_000_000_000,
+            args.rows as u64 + 1,
+        );
+        if !wal_rows.is_empty() {
+            wal_time_lo = Some(wal_rows[wal_rows.len() / 2].start_time_ms);
+            wal_time_hi = wal_time_lo.map(|lo| lo + 10_000);
+        }
+        for chunk in wal_rows.chunks(args.wal_rows) {
+            let batch = flush_to_record_batch(chunk)?;
+            let commit_id = chunk.first().map(|r| r.commit_id).unwrap_or(CommitId(0));
+            let bounds = WalObjectBounds::from_span_records(chunk);
+            let key = writer
+                .flush(tenant, partition, commit_id, schema.fingerprint(), &batch)
+                .await?;
+            let object_bytes = store.get(&key.to_string()).await?.len();
+            wal_bytes += object_bytes;
+            catalog
+                .register_wal_object(WalObjectRow {
+                    wal_id: uuid::Uuid::from_u128(ulid::Ulid::new().0),
+                    tenant_id: tenant,
+                    partition_id: partition,
+                    object_key: key.to_string(),
+                    commit_id_min: chunk.first().map(|r| r.commit_id).unwrap_or(commit_id),
+                    commit_id_max: chunk.last().map(|r| r.commit_id).unwrap_or(commit_id),
+                    byte_count: object_bytes as i64,
+                    row_count: chunk.len() as i64,
+                    time_min: bounds.time_min,
+                    time_max: bounds.time_max,
+                    trace_id_min: bounds.trace_id_min,
+                    trace_id_max: bounds.trace_id_max,
+                    schema_fingerprint: schema.fingerprint(),
+                    consumed_at: None,
+                    created_at: Utc::now(),
+                })
+                .await?;
+        }
+    }
+
     Ok(BuiltCorpus {
         catalog,
         store,
         trace_id,
+        time_lo,
+        time_hi,
+        wal_time_lo,
+        wal_time_hi,
         segments,
+        wal_objects: args.wal_objects,
         bytes: total_bytes,
+        wal_bytes,
     })
 }
 
+fn sparse_rowgroup_index(reader: &zen_format::SegmentReader) -> anyhow::Result<Vec<u8>> {
+    let mut sparse = SparseRowGroupIndex::new();
+    for rg_hc in &reader.hotcache.row_groups {
+        let trace_zm = rg_hc.columns.iter().find(|c| {
+            reader
+                .metadata
+                .column_names
+                .get(c.column_idx as usize)
+                .is_some_and(|name| name == "trace_id")
+        });
+        let time_zm = rg_hc.columns.iter().find(|c| {
+            reader
+                .metadata
+                .column_names
+                .get(c.column_idx as usize)
+                .is_some_and(|name| name == "start_time_ms")
+        });
+        let commit_zm = rg_hc.columns.iter().find(|c| {
+            reader
+                .metadata
+                .column_names
+                .get(c.column_idx as usize)
+                .is_some_and(|name| name == "commit_id")
+        });
+
+        let (min_tid, max_tid) = match trace_zm.map(|c| &c.zone_map.value) {
+            Some(zen_index::ZoneMapValue::Fixed { min, max })
+            | Some(zen_index::ZoneMapValue::Bytes { min, max }) => {
+                let mut mn = [0u8; 16];
+                let mut mx = [0u8; 16];
+                let lmin = min.len().min(16);
+                let lmax = max.len().min(16);
+                mn[..lmin].copy_from_slice(&min[..lmin]);
+                mx[..lmax].copy_from_slice(&max[..lmax]);
+                (mn, mx)
+            }
+            _ => ([0u8; 16], [0xffu8; 16]),
+        };
+        let (min_t, max_t) = match time_zm.map(|c| &c.zone_map.value) {
+            Some(zen_index::ZoneMapValue::I64 { min, max }) => (*min, *max),
+            _ => (i64::MIN, i64::MAX),
+        };
+        let (min_c, max_c) = match commit_zm.map(|c| &c.zone_map.value) {
+            Some(zen_index::ZoneMapValue::I64 { min, max }) => (*min as u64, *max as u64),
+            _ => (0, u64::MAX),
+        };
+        sparse.push(RowGroupKey {
+            min_trace_id: min_tid,
+            max_trace_id: max_tid,
+            min_start_time: min_t,
+            max_start_time: max_t,
+            min_commit_id: min_c,
+            max_commit_id: max_c,
+        });
+    }
+    Ok(sparse.serialize()?.to_vec())
+}
+
 fn generate_rows(target_rows: usize) -> Vec<SpanRecord> {
+    generate_rows_from(target_rows, 1, 1_700_000_000_000, 1)
+}
+
+fn generate_rows_from(
+    target_rows: usize,
+    first_trace_no: u128,
+    base_time: i64,
+    first_commit_id: u64,
+) -> Vec<SpanRecord> {
     const MODELS: [&str; 8] = [
         "gpt-4o",
         "claude-sonnet-4-7",
@@ -200,10 +346,9 @@ fn generate_rows(target_rows: usize) -> Vec<SpanRecord> {
     ];
 
     let mut rows = Vec::with_capacity(target_rows);
-    let mut trace_no = 0u128;
-    let base_time = 1_700_000_000_000i64;
+    let mut trace_no = first_trace_no;
     while rows.len() < target_rows {
-        let trace_id = TraceId::from_u128(trace_no + 1);
+        let trace_id = TraceId::from_u128(trace_no);
         let spans_in_trace = 8 + (trace_no as usize % 9);
         for span_no in 0..spans_in_trace {
             if rows.len() >= target_rows {
@@ -269,7 +414,7 @@ fn generate_rows(target_rows: usize) -> Vec<SpanRecord> {
                     ]
                 }
             }));
-            row.commit_id = CommitId((row_no + 1) as u64);
+            row.commit_id = CommitId(first_commit_id + row_no as u64);
             rows.push(row);
         }
         trace_no += 1;
@@ -298,7 +443,7 @@ fn weighted_model<'a>(row_no: usize, models: &'a [&str]) -> &'a str {
 }
 
 async fn run_suite(args: &Args, corpus: &BuiltCorpus, mode: &str) -> anyhow::Result<()> {
-    let queries: Vec<(&str, String)> = vec![
+    let mut queries: Vec<(&str, String)> = vec![
         (
             "B1_trace_load",
             format!(
@@ -315,6 +460,13 @@ async fn run_suite(args: &Args, corpus: &BuiltCorpus, mode: &str) -> anyhow::Res
             "SELECT span_id, prompt FROM spans WHERE text_match(prompt, 'memory') LIMIT 100".into(),
         ),
         (
+            "B4_time_slice",
+            format!(
+                "SELECT span_id, start_time_ms FROM spans WHERE start_time_ms >= {} AND start_time_ms < {} LIMIT 100",
+                corpus.time_lo, corpus.time_hi
+            ),
+        ),
+        (
             "B6_jsonpath",
             "SELECT span_id FROM spans WHERE metadata.tier = 'primary' LIMIT 100".into(),
         ),
@@ -323,6 +475,14 @@ async fn run_suite(args: &Args, corpus: &BuiltCorpus, mode: &str) -> anyhow::Res
             "SELECT model, count(*) FROM spans GROUP BY model".into(),
         ),
     ];
+    if let (Some(lo), Some(hi)) = (corpus.wal_time_lo, corpus.wal_time_hi) {
+        queries.push((
+            "B5_wal_time_slice",
+            format!(
+                "SELECT span_id, start_time_ms FROM spans WHERE start_time_ms >= {lo} AND start_time_ms < {hi} LIMIT 100"
+            ),
+        ));
+    }
 
     println!("\n## mode={mode} iters={}\n", args.iters);
     println!(

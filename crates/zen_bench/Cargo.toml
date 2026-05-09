@@ -17,6 +17,9 @@ zen_catalog = { workspace = true }
 zen_storage = { workspace = true }
 zen_format = { workspace = true }
 zen_compactor = { workspace = true }
+zen_index = { workspace = true }
+zen_memtable = { workspace = true }
+zen_wal = { workspace = true }
 arrow = { workspace = true }
 arrow-array = { workspace = true }
 arrow-schema = { workspace = true }
