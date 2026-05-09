@@ -7,13 +7,18 @@ use chrono::Utc;
 use ulid::Ulid;
 use uuid::Uuid;
 
-use zen_catalog::{Catalog, SegmentRow};
+use zen_catalog::{Catalog, SegmentRow, WalObjectRow};
 use zen_common::{CommitId, PartitionId, Schema, TenantId, ZenError, ZenResult};
+use zen_format::SegmentReader;
 use zen_index::sparse::{RowGroupKey, SparseRowGroupIndex};
 use zen_storage::BlobStore;
 
-use crate::build::{build_segment_from_iter, build_segment_from_rows, BuildOptions};
+use crate::build::{build_segment_from_rows, estimate_span_record_bytes, BuildOptions};
 use crate::merge::merge_wals;
+
+const FULL_COMPACTION_TARGET_ROW_GROUPS: usize = 128;
+const WAL_COMPACTION_TARGET_BYTES: i64 = 512 * 1024 * 1024;
+const WAL_COMPACTION_TARGET_ROWS: i64 = 1_000_000;
 
 #[derive(Clone, Debug, Default)]
 pub struct CompactionStats {
@@ -49,11 +54,12 @@ pub async fn compact_partition(
         return Ok(CompactionStats::default());
     }
 
-    let keys: Vec<String> = wals.iter().map(|w| w.object_key.clone()).collect();
+    let wal_batch = select_wal_batch(&wals);
+    let keys: Vec<String> = wal_batch.iter().map(|w| w.object_key.clone()).collect();
     // Highest catalog commit_id_max among the WALs we're consuming. Use this for
     // mark_wal_consumed; the WAL header's commit_id is its commit_id_min, which
     // is too low and would leave WALs orphaned and re-merged on the next compact.
-    let consumed_through = wals
+    let consumed_through = wal_batch
         .iter()
         .map(|w| w.commit_id_max)
         .max()
@@ -70,7 +76,7 @@ pub async fn compact_partition(
             .await
             .ok();
         return Ok(CompactionStats {
-            wal_objects_consumed: wals.len() as u32,
+            wal_objects_consumed: wal_batch.len() as u32,
             ..Default::default()
         });
     }
@@ -160,19 +166,40 @@ pub async fn compact_partition(
         .ok();
 
     Ok(CompactionStats {
-        wal_objects_consumed: wals.len() as u32,
+        wal_objects_consumed: wal_batch.len() as u32,
         rows_compacted: n_rows as u64,
         segment_bytes: segment_bytes.len() as u64,
         elapsed_ms: start.elapsed().as_millis() as u64,
     })
 }
 
-/// Tier-N compaction: read every active segment + every unconsumed WAL,
-/// merge into one big segment, mark inputs as superseded/consumed.
+fn select_wal_batch(wals: &[WalObjectRow]) -> &[WalObjectRow] {
+    let mut end = 0usize;
+    let mut bytes = 0i64;
+    let mut rows = 0i64;
+    for w in wals {
+        if end > 0
+            && ((bytes > 0 && bytes >= WAL_COMPACTION_TARGET_BYTES)
+                || (rows > 0 && rows >= WAL_COMPACTION_TARGET_ROWS))
+        {
+            break;
+        }
+        end += 1;
+        bytes = bytes.saturating_add(w.byte_count.max(0));
+        rows = rows.saturating_add(w.row_count.max(0));
+    }
+    &wals[..end]
+}
+
+/// Tier-N compaction: read active segments + a bounded prefix of unconsumed
+/// WALs, merge them, publish bounded output segments, then mark inputs as
+/// superseded/consumed.
 ///
-/// **Memory-bounded**: streams a k-way merge over input segments via
-/// `streaming_compact_segments` so we never hold more than one row group
-/// per input in memory at once. Required to compact at 1 TB+ scale.
+/// The output side is bounded by `BuildOptions` and
+/// `FULL_COMPACTION_TARGET_ROW_GROUPS`, and WAL catch-up is bounded by
+/// `select_wal_batch`. Segment inputs are still opened as full `SegmentReader`s,
+/// so very large deployments should run this before active segment counts get
+/// pathological.
 ///
 /// Run periodically (or on demand) once the segment count gets high enough
 /// that scans pay multi-segment overhead.
@@ -184,7 +211,30 @@ pub async fn compact_full(
     worker_id: &str,
     schema: &Schema,
 ) -> ZenResult<CompactionStats> {
-    use zen_format::SegmentReader;
+    let opts = BuildOptions::default();
+    compact_full_with_options(
+        catalog,
+        store,
+        tenant,
+        partition,
+        worker_id,
+        schema,
+        &opts,
+        FULL_COMPACTION_TARGET_ROW_GROUPS,
+    )
+    .await
+}
+
+async fn compact_full_with_options(
+    catalog: Arc<dyn Catalog>,
+    store: Arc<dyn BlobStore>,
+    tenant: TenantId,
+    partition: PartitionId,
+    worker_id: &str,
+    schema: &Schema,
+    opts: &BuildOptions,
+    target_segment_row_groups: usize,
+) -> ZenResult<CompactionStats> {
     let start = std::time::Instant::now();
     catalog
         .acquire_compaction_lease(tenant, partition, worker_id, 120)
@@ -216,8 +266,9 @@ pub async fn compact_full(
 
     // Pull WAL rows once; merge_wals already sorts them.
     let mut wal_rows: Vec<zen_common::SpanRecord> = Vec::new();
-    if !wals.is_empty() {
-        let keys: Vec<String> = wals.iter().map(|w| w.object_key.clone()).collect();
+    let wal_batch = select_wal_batch(&wals);
+    if !wal_batch.is_empty() {
+        let keys: Vec<String> = wal_batch.iter().map(|w| w.object_key.clone()).collect();
         let merged = merge_wals(store.clone(), &keys).await?;
         wal_rows = merged.rows;
     }
@@ -232,29 +283,171 @@ pub async fn compact_full(
         sources.push(Box::new(wal_rows.into_iter()));
     }
 
-    // K-way merge in (trace_id, start_time, span_id) order. Streaming output:
-    // build_segment_from_iter pulls rows lazily and finalizes one row group at
-    // a time, so memory is bounded by row_group_max_rows × bytes-per-row,
-    // not by total compacted size. This is what unblocks 1 TB+ scale.
-    let merge = KWayMerge::new(sources);
-    let opts = BuildOptions::default();
-    let built = build_segment_from_iter(merge, tenant, partition, schema, &opts)?;
-    let (segment_bytes, meta, n_rows) = match built {
-        Some(t) => t,
-        None => {
-            catalog
-                .release_compaction_lease(tenant, partition, worker_id)
-                .await
-                .ok();
-            return Ok(CompactionStats::default());
-        }
-    };
+    // K-way merge in (trace_id, start_time, span_id) order. Output is chunked
+    // into bounded tier-1 segments so full compaction never materializes a
+    // tenant's whole partition into one in-memory writer or one giant object.
+    let max_segment_rows = (opts.row_group_max_rows as usize)
+        .saturating_mul(target_segment_row_groups.max(1))
+        .max(1);
+    let max_segment_bytes = opts
+        .row_group_max_bytes
+        .saturating_mul(target_segment_row_groups.max(1) as u64)
+        .max(1);
+    let mut merge = KWayMerge::new(sources);
+    let mut batch: Vec<zen_common::SpanRecord> = Vec::new();
+    let mut batch_estimated_bytes = 0u64;
+    let mut prev_key: Option<(u64, [u8; 16])> = None;
+    let mut last_trace_id: Option<[u8; 16]> = None;
+    let mut rows_compacted = 0u64;
+    let mut segment_bytes_total = 0u64;
 
-    // Reconstruct sparse row-group index from the freshly written segment.
+    while let Some(row) = merge.next() {
+        if (batch.len() >= max_segment_rows || batch_estimated_bytes >= max_segment_bytes)
+            && last_trace_id.is_some_and(|tid| tid != row.trace_id.0)
+        {
+            let (rows, bytes) = publish_compacted_segment(
+                catalog.clone(),
+                store.clone(),
+                tenant,
+                partition,
+                schema,
+                opts,
+                &batch,
+                1,
+            )
+            .await?;
+            rows_compacted += rows as u64;
+            segment_bytes_total += bytes;
+            batch.clear();
+            batch_estimated_bytes = 0;
+            prev_key = None;
+            last_trace_id = None;
+        }
+
+        // Preserve the streaming builder's adjacent tombstone dedup behavior
+        // while allowing each flushed output segment to stay bounded.
+        let key = (row.tenant_id.0, row.span_id.0);
+        if Some(key) == prev_key {
+            if let Some(last) = batch.last_mut() {
+                if row.commit_id.0 > last.commit_id.0 {
+                    *last = row;
+                }
+            }
+            continue;
+        }
+        prev_key = Some(key);
+        last_trace_id = Some(row.trace_id.0);
+        batch_estimated_bytes =
+            batch_estimated_bytes.saturating_add(estimate_span_record_bytes(&row) as u64);
+        batch.push(row);
+    }
+
+    if !batch.is_empty() {
+        let (rows, bytes) = publish_compacted_segment(
+            catalog.clone(),
+            store.clone(),
+            tenant,
+            partition,
+            schema,
+            opts,
+            &batch,
+            1,
+        )
+        .await?;
+        rows_compacted += rows as u64;
+        segment_bytes_total += bytes;
+    }
+
+    if rows_compacted == 0 {
+        catalog
+            .release_compaction_lease(tenant, partition, worker_id)
+            .await
+            .ok();
+        return Ok(CompactionStats::default());
+    }
+
+    // Mark old segments superseded. Tenant-scoped so a buggy compactor
+    // can't supersede another tenant's segments by passing a UUID it
+    // doesn't own.
+    let old_ids: Vec<Uuid> = segs.iter().map(|s| s.segment_id).collect();
+    catalog
+        .mark_segments_superseded(tenant, &old_ids, Utc::now())
+        .await?;
+
+    // Mark WALs consumed.
+    if !wal_batch.is_empty() {
+        let consumed_through = wal_batch
+            .iter()
+            .map(|w| w.commit_id_max)
+            .max()
+            .unwrap_or(CommitId(0));
+        catalog
+            .mark_wal_consumed(tenant, partition, consumed_through, Utc::now())
+            .await
+            .ok();
+    }
+
+    catalog
+        .release_compaction_lease(tenant, partition, worker_id)
+        .await
+        .ok();
+    Ok(CompactionStats {
+        wal_objects_consumed: wal_batch.len() as u32,
+        rows_compacted,
+        segment_bytes: segment_bytes_total,
+        elapsed_ms: start.elapsed().as_millis() as u64,
+    })
+}
+
+async fn publish_compacted_segment(
+    catalog: Arc<dyn Catalog>,
+    store: Arc<dyn BlobStore>,
+    tenant: TenantId,
+    partition: PartitionId,
+    schema: &Schema,
+    opts: &BuildOptions,
+    rows: &[zen_common::SpanRecord],
+    level: i16,
+) -> ZenResult<(usize, u64)> {
+    let (segment_bytes, meta) = build_segment_from_rows(rows, tenant, partition, schema, opts)?;
+    let sparse_bytes = sparse_rowgroup_index_from_segment(&segment_bytes)?;
+    let object_key = format!(
+        "segments/{}/{}/{}.zseg",
+        tenant,
+        partition,
+        Ulid::from(meta.segment_id)
+    );
+    store
+        .put(&object_key, Bytes::from(segment_bytes.clone()))
+        .await?;
+    catalog
+        .register_segment(SegmentRow {
+            segment_id: Uuid::from_u128(meta.segment_id),
+            tenant_id: tenant,
+            partition_id: partition,
+            object_key,
+            level,
+            byte_count: segment_bytes.len() as i64,
+            row_count: rows.len() as i64,
+            time_min: meta.time_min_ms,
+            time_max: meta.time_max_ms,
+            trace_id_min: meta.trace_id_min,
+            trace_id_max: meta.trace_id_max,
+            commit_id_min: meta.commit_id_min,
+            commit_id_max: meta.commit_id_max,
+            schema_fingerprint: meta.schema_fingerprint,
+            rowgroup_index: sparse_bytes,
+            superseded_at: None,
+            created_at: Utc::now(),
+        })
+        .await?;
+    Ok((rows.len(), segment_bytes.len() as u64))
+}
+
+fn sparse_rowgroup_index_from_segment(segment_bytes: &[u8]) -> ZenResult<Vec<u8>> {
+    let reader = SegmentReader::from_bytes(segment_bytes.to_vec())?;
     let mut sparse = SparseRowGroupIndex::new();
-    let reader = SegmentReader::from_bytes(segment_bytes.clone())?;
     for (i, _rg) in reader.row_groups.iter().enumerate() {
-        // Pull min/max from the hotcache zone maps we just built.
         if let Some(rg_hc) = reader.hotcache.row_groups.get(i) {
             let trace_zm = rg_hc.columns.iter().find(|c| {
                 reader
@@ -308,72 +501,10 @@ pub async fn compact_full(
             });
         }
     }
-    let sparse_bytes = sparse
+    sparse
         .serialize()
-        .map_err(|e| ZenError::compactor(format!("sparse: {e}")))?;
-
-    let object_key = format!(
-        "segments/{}/{}/{}.zseg",
-        tenant,
-        partition,
-        Ulid::from(meta.segment_id)
-    );
-    store
-        .put(&object_key, Bytes::from(segment_bytes.clone()))
-        .await?;
-    catalog
-        .register_segment(SegmentRow {
-            segment_id: Uuid::from_u128(meta.segment_id),
-            tenant_id: tenant,
-            partition_id: partition,
-            object_key: object_key.clone(),
-            level: 1, // tier-2
-            byte_count: segment_bytes.len() as i64,
-            row_count: n_rows as i64,
-            time_min: meta.time_min_ms,
-            time_max: meta.time_max_ms,
-            trace_id_min: meta.trace_id_min,
-            trace_id_max: meta.trace_id_max,
-            commit_id_min: meta.commit_id_min,
-            commit_id_max: meta.commit_id_max,
-            schema_fingerprint: meta.schema_fingerprint,
-            rowgroup_index: sparse_bytes.to_vec(),
-            superseded_at: None,
-            created_at: Utc::now(),
-        })
-        .await?;
-
-    // Mark old segments superseded. Tenant-scoped so a buggy compactor
-    // can't supersede another tenant's segments by passing a UUID it
-    // doesn't own.
-    let old_ids: Vec<Uuid> = segs.iter().map(|s| s.segment_id).collect();
-    catalog
-        .mark_segments_superseded(tenant, &old_ids, Utc::now())
-        .await?;
-
-    // Mark WALs consumed.
-    if !wals.is_empty() {
-        let consumed_through = wals
-            .iter()
-            .map(|w| w.commit_id_max)
-            .max()
-            .unwrap_or(CommitId(0));
-        catalog
-            .mark_wal_consumed(tenant, partition, consumed_through, Utc::now())
-            .await
-            .ok();
-    }
-
-    catalog
-        .release_compaction_lease(tenant, partition, worker_id)
-        .await
-        .ok();
-    Ok(CompactionStats {
-        wal_objects_consumed: wals.len() as u32,
-        rows_compacted: n_rows as u64,
-        segment_bytes: segment_bytes.len() as u64,
-        elapsed_ms: start.elapsed().as_millis() as u64,
-    })
+        .map(|bytes| bytes.to_vec())
+        .map_err(|e| ZenError::compactor(format!("sparse: {e}")))
 }
 
 fn decode_row_group_to_records(
@@ -673,7 +804,10 @@ mod tests {
     use ulid::Ulid;
     use uuid::Uuid;
 
-    use zen_catalog::{model::WalObjectRow, MockCatalog};
+    use zen_catalog::{
+        model::{WalObjectBounds, WalObjectRow},
+        MockCatalog,
+    };
     use zen_common::{Schema, SchemaFingerprint, SpanId, SpanRecord, TraceId};
     use zen_memtable::flush_to_record_batch;
     use zen_storage::local_fs::InMemoryStore;
@@ -719,6 +853,7 @@ mod tests {
         let writer = WalWriter::new(store.clone());
         for (i, chunk) in chunks.into_iter().enumerate() {
             let batch = flush_to_record_batch(chunk).unwrap();
+            let bounds = WalObjectBounds::from_span_records(chunk);
             let key = writer
                 .flush(
                     TenantId(1),
@@ -739,6 +874,10 @@ mod tests {
                     commit_id_max: CommitId((i as u64) + 1),
                     byte_count: 0,
                     row_count: chunk.len() as i64,
+                    time_min: bounds.time_min,
+                    time_max: bounds.time_max,
+                    trace_id_min: bounds.trace_id_min,
+                    trace_id_max: bounds.trace_id_max,
                     schema_fingerprint: SchemaFingerprint(0),
                     consumed_at: None,
                     created_at: Utc::now(),
@@ -801,5 +940,102 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(stats.rows_compacted, 0);
+    }
+
+    #[test]
+    fn wal_batch_selection_caps_large_backlogs() {
+        let wals: Vec<WalObjectRow> = (0..5)
+            .map(|i| WalObjectRow {
+                wal_id: Uuid::from_u128(Ulid::new().0),
+                tenant_id: TenantId(1),
+                partition_id: PartitionId(0),
+                object_key: format!("wal-{i}"),
+                commit_id_min: CommitId(i + 1),
+                commit_id_max: CommitId(i + 1),
+                byte_count: 300 * 1024 * 1024,
+                row_count: 250_000,
+                time_min: i64::MIN,
+                time_max: i64::MAX,
+                trace_id_min: TraceId([0; 16]),
+                trace_id_max: TraceId([0xff; 16]),
+                schema_fingerprint: SchemaFingerprint(0),
+                consumed_at: None,
+                created_at: Utc::now(),
+            })
+            .collect();
+
+        let selected = select_wal_batch(&wals);
+        assert_eq!(selected.len(), 2);
+        assert_eq!(selected.last().unwrap().commit_id_max, CommitId(2));
+    }
+
+    #[tokio::test]
+    async fn full_compaction_splits_output_segments_at_trace_boundaries() {
+        let store: Arc<dyn BlobStore> = Arc::new(InMemoryStore::default());
+        let catalog: Arc<dyn Catalog> = Arc::new(MockCatalog::new());
+        catalog.ensure_tenant(TenantId(1), "t").await.unwrap();
+        catalog
+            .ensure_partition(TenantId(1), PartitionId(0))
+            .await
+            .unwrap();
+        let schema = Schema::spans_v1();
+        let opts = BuildOptions {
+            row_group_max_rows: 2,
+            row_group_max_bytes: 64 * 1024 * 1024,
+        };
+
+        let mut rows = Vec::new();
+        for t in 0..4u32 {
+            let mut tid = [0u8; 16];
+            tid[0..4].copy_from_slice(&t.to_be_bytes());
+            for s in 0..4u32 {
+                let mut sid = [0u8; 16];
+                sid[0..4].copy_from_slice(&t.to_be_bytes());
+                sid[4..8].copy_from_slice(&s.to_be_bytes());
+                let mut r = SpanRecord::new(TenantId(1), PartitionId(0));
+                r.trace_id = TraceId(tid);
+                r.span_id = SpanId(sid);
+                r.start_time_ms = (t as i64) * 1_000 + s as i64;
+                r.end_time_ms = r.start_time_ms + 1;
+                r.duration_ms = 1;
+                r.commit_id = CommitId((t * 4 + s + 1) as u64);
+                rows.push(r);
+            }
+        }
+
+        for chunk in rows.chunks(8) {
+            publish_compacted_segment(
+                catalog.clone(),
+                store.clone(),
+                TenantId(1),
+                PartitionId(0),
+                &schema,
+                &opts,
+                chunk,
+                0,
+            )
+            .await
+            .unwrap();
+        }
+
+        let stats = compact_full_with_options(
+            catalog.clone(),
+            store.clone(),
+            TenantId(1),
+            PartitionId(0),
+            "full-worker",
+            &schema,
+            &opts,
+            2,
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(stats.rows_compacted, 16);
+        let active = catalog.list_segments_for_tenant(TenantId(1)).await.unwrap();
+        assert_eq!(active.len(), 4);
+        assert!(active.iter().all(|s| s.level == 1));
+        assert!(active.iter().all(|s| s.row_count == 4));
+        assert!(active.iter().all(|s| !s.rowgroup_index.is_empty()));
     }
 }

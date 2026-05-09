@@ -33,6 +33,37 @@ impl Default for BuildOptions {
     }
 }
 
+pub(crate) fn estimate_span_record_bytes(r: &SpanRecord) -> usize {
+    const FIXED_BYTES: usize = 192;
+    let strings = [
+        r.span_type.as_deref(),
+        r.status.as_deref(),
+        r.provider.as_deref(),
+        r.model.as_deref(),
+        r.tool_name.as_deref(),
+        r.prompt.as_deref(),
+        r.completion.as_deref(),
+        r.tool_io_text.as_deref(),
+        r.user_id.as_deref(),
+        r.session_id.as_deref(),
+        r.request_id.as_deref(),
+    ]
+    .into_iter()
+    .flatten()
+    .map(str::len)
+    .sum::<usize>();
+    let metadata = r
+        .metadata
+        .as_ref()
+        .map(|v| v.to_string().len())
+        .unwrap_or(0);
+    let embedding = r.embedding.as_ref().map(|v| v.len() * 4).unwrap_or(0);
+    FIXED_BYTES
+        .saturating_add(strings)
+        .saturating_add(metadata)
+        .saturating_add(embedding)
+}
+
 /// Build a segment from sorted rows. Returns the segment bytes and the
 /// updated metadata.
 pub fn build_segment_from_rows(
@@ -87,16 +118,30 @@ pub fn build_segment_from_rows(
         })
         .collect();
 
+    let max_row_group_rows = opts.row_group_max_rows.max(1) as usize;
+    let max_row_group_bytes = opts.row_group_max_bytes.max(1) as usize;
     let mut start = 0usize;
     let mut rg_idx = 0u32;
     while start < rows.len() {
-        let mut end = (start + opts.row_group_max_rows as usize).min(rows.len());
+        let mut end = start;
+        let mut estimated_bytes = 0usize;
+        while end < rows.len() && end - start < max_row_group_rows {
+            let row_bytes = estimate_span_record_bytes(&rows[end]);
+            if end > start && estimated_bytes.saturating_add(row_bytes) > max_row_group_bytes {
+                break;
+            }
+            estimated_bytes = estimated_bytes.saturating_add(row_bytes);
+            end += 1;
+        }
+        if end == start {
+            end = (start + 1).min(rows.len());
+        }
         if end < rows.len() {
             while end > start && rows[end].trace_id == rows[end - 1].trace_id {
                 end -= 1;
             }
             if end == start {
-                end = (start + opts.row_group_max_rows as usize).min(rows.len());
+                end = (start + max_row_group_rows).min(rows.len());
             }
         }
         let chunk = &rows[start..end];
@@ -564,7 +609,10 @@ where
         })
         .collect();
 
-    let mut buf: Vec<SpanRecord> = Vec::with_capacity(opts.row_group_max_rows as usize);
+    let max_row_group_rows = opts.row_group_max_rows.max(1) as usize;
+    let max_row_group_bytes = opts.row_group_max_bytes.max(1) as usize;
+    let mut buf: Vec<SpanRecord> = Vec::with_capacity(max_row_group_rows);
+    let mut buf_estimated_bytes = 0usize;
     let mut prev_key: Option<(u64, [u8; 16])> = None;
     let mut rg_idx_counter: u32 = 0;
     let mut total_rows: usize = 0;
@@ -588,11 +636,12 @@ where
             continue;
         }
         prev_key = Some(key);
+        buf_estimated_bytes = buf_estimated_bytes.saturating_add(estimate_span_record_bytes(&row));
         buf.push(row);
         empty = false;
         total_rows += 1;
 
-        if buf.len() >= opts.row_group_max_rows as usize {
+        if buf.len() >= max_row_group_rows || buf_estimated_bytes >= max_row_group_bytes {
             // Don't split mid-trace: peek-look-back. If last few rows share the
             // most recent trace_id, hold back until we see a boundary.
             // For simplicity here we just flush the whole buffer; callers can
@@ -609,6 +658,7 @@ where
             )?;
             rg_idx_counter += 1;
             buf.clear();
+            buf_estimated_bytes = 0;
             prev_key = None; // safe to reset since cross-rg dedup is rare and the writer is monotonic
         }
     }
@@ -742,4 +792,40 @@ fn finalize_one_row_group(
     });
     writer.add_row_group(rg_header, rg_payload);
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use zen_common::{CommitId, SpanId, TraceId};
+
+    use super::*;
+
+    #[test]
+    fn row_group_max_bytes_splits_large_rows() {
+        let schema = Schema::spans_v1();
+        let opts = BuildOptions {
+            row_group_max_rows: 100,
+            row_group_max_bytes: 512,
+        };
+        let mut rows = Vec::new();
+        for i in 0..3u32 {
+            let mut tid = [0u8; 16];
+            tid[0..4].copy_from_slice(&i.to_be_bytes());
+            let mut sid = [0u8; 16];
+            sid[0..4].copy_from_slice(&i.to_be_bytes());
+            let mut r = SpanRecord::new(TenantId(1), PartitionId(0));
+            r.trace_id = TraceId(tid);
+            r.span_id = SpanId(sid);
+            r.start_time_ms = i as i64;
+            r.end_time_ms = i as i64 + 1;
+            r.prompt = Some("x".repeat(700));
+            r.commit_id = CommitId(i as u64 + 1);
+            rows.push(r);
+        }
+
+        let (bytes, _) =
+            build_segment_from_rows(&rows, TenantId(1), PartitionId(0), &schema, &opts).unwrap();
+        let reader = zen_format::SegmentReader::from_bytes(bytes).unwrap();
+        assert_eq!(reader.row_group_count(), 3);
+    }
 }

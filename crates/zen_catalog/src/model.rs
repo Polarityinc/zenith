@@ -3,7 +3,51 @@
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
-use zen_common::{CommitId, PartitionId, SchemaFingerprint, TenantId, TraceId};
+use zen_common::{CommitId, PartitionId, SchemaFingerprint, SpanRecord, TenantId, TraceId};
+
+#[derive(Clone, Copy, Debug, Serialize, Deserialize)]
+pub struct WalObjectBounds {
+    pub time_min: i64,
+    pub time_max: i64,
+    pub trace_id_min: TraceId,
+    pub trace_id_max: TraceId,
+}
+
+impl WalObjectBounds {
+    pub fn from_span_records(records: &[SpanRecord]) -> Self {
+        let mut time_min = i64::MAX;
+        let mut time_max = i64::MIN;
+        let mut trace_id_min = TraceId([0xff; 16]);
+        let mut trace_id_max = TraceId([0; 16]);
+
+        for r in records {
+            time_min = time_min.min(r.start_time_ms);
+            time_max = time_max.max(r.start_time_ms);
+            if r.trace_id.0 < trace_id_min.0 {
+                trace_id_min = r.trace_id;
+            }
+            if r.trace_id.0 > trace_id_max.0 {
+                trace_id_max = r.trace_id;
+            }
+        }
+
+        if records.is_empty() {
+            return Self {
+                time_min: i64::MIN,
+                time_max: i64::MAX,
+                trace_id_min: TraceId([0; 16]),
+                trace_id_max: TraceId([0xff; 16]),
+            };
+        }
+
+        Self {
+            time_min,
+            time_max,
+            trace_id_min,
+            trace_id_max,
+        }
+    }
+}
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct WalObjectRow {
@@ -15,6 +59,10 @@ pub struct WalObjectRow {
     pub commit_id_max: CommitId,
     pub byte_count: i64,
     pub row_count: i64,
+    pub time_min: i64,
+    pub time_max: i64,
+    pub trace_id_min: TraceId,
+    pub trace_id_max: TraceId,
     pub schema_fingerprint: SchemaFingerprint,
     pub consumed_at: Option<DateTime<Utc>>,
     pub created_at: DateTime<Utc>,
