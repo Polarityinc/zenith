@@ -272,3 +272,147 @@ impl Default for SegmentCache {
         Self::new(256)
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    use std::sync::Arc;
+
+    use bytes::Bytes;
+    use zen_format::page::{encode_page, ColumnValues, PageEncoding};
+    use zen_format::row_group::RowGroupBuilder;
+    use zen_format::{SegmentMetadata, SegmentWriter};
+    use zen_storage::local_fs::InMemoryStore;
+
+    use zen_common::{PartitionId, SchemaFingerprint, TenantId};
+
+    /// Build a tiny segment with a single row group of two columns. Same
+    /// shape used by the format crate's own tests; replicated here so we
+    /// don't depend on a `pub use` of test helpers.
+    fn build_tiny_segment(tenant: u64, marker: i64) -> Vec<u8> {
+        let meta = SegmentMetadata::new(
+            1,
+            TenantId(tenant),
+            PartitionId(0),
+            SchemaFingerprint(0xABCD),
+            vec!["start_time_ms".into(), "model".into()],
+            vec!["start_time_ms".into()],
+        );
+        let mut writer = SegmentWriter::new(meta);
+        let mut rgb = RowGroupBuilder::new(2);
+        let times: Vec<i64> = vec![marker, marker + 1];
+        let (e, b) = encode_page(ColumnValues::I64(times), PageEncoding::For).unwrap();
+        rgb.add_page(0, e, b.to_vec(), 16);
+        let models: Vec<Vec<u8>> = vec![b"gpt-4o".to_vec(), b"haiku".to_vec()];
+        let (e, b) = encode_page(ColumnValues::StringsOwned(models), PageEncoding::Dict).unwrap();
+        rgb.add_page(1, e, b.to_vec(), 32);
+        let (payload, header) = rgb.finish();
+        writer.add_row_group(header, payload);
+        writer.finish().unwrap().to_vec()
+    }
+
+    /// `get_or_load` fetches the segment on first call and re-uses the same
+    /// `Arc<SegmentExtras>` on subsequent calls (the BlobStore is hit only
+    /// once).
+    #[tokio::test]
+    async fn segment_cache_insert_and_get_works() {
+        let store = Arc::new(InMemoryStore::default());
+        let bytes = build_tiny_segment(1, 100);
+        store
+            .put("seg/1", Bytes::from(bytes.clone()))
+            .await
+            .unwrap();
+
+        let cache = SegmentCache::new(8);
+        let a = cache.get_or_load("seg/1", store.clone()).await.unwrap();
+        let b = cache.get_or_load("seg/1", store.clone()).await.unwrap();
+        assert!(
+            Arc::ptr_eq(&a, &b),
+            "the second get should return the same Arc"
+        );
+        assert_eq!(a.reader.metadata.tenant_id.0, 1);
+        assert_eq!(a.reader.metadata.row_count, 2);
+
+        // Sanity: the underlying store still has only the one key.
+        let keys = store.list("").await.unwrap();
+        assert_eq!(keys, vec!["seg/1".to_string()]);
+    }
+
+    /// Inserting capacity+1 segments evicts at least one entry. Moka's
+    /// W-TinyLFU is not strict LRU; we don't pin which key got evicted, but
+    /// the post-drain count must be ≤ capacity.
+    #[tokio::test]
+    async fn segment_cache_evicts_at_capacity() {
+        let store: Arc<dyn BlobStore> = Arc::new(InMemoryStore::default());
+        let cap = 4u64;
+        // Pre-populate the store with cap+3 distinct segments.
+        let n = (cap + 3) as i64;
+        for i in 0..n {
+            let bytes = build_tiny_segment(i as u64, i);
+            store
+                .put(&format!("seg/{i}"), Bytes::from(bytes))
+                .await
+                .unwrap();
+        }
+        let cache = SegmentCache::new(cap);
+        for i in 0..n {
+            let _ = cache
+                .get_or_load(&format!("seg/{i}"), store.clone())
+                .await
+                .unwrap();
+        }
+        cache.inner.run_pending_tasks().await;
+        let count = cache.inner.entry_count();
+        assert!(
+            count <= cap,
+            "after pending drain, cache size {count} must be ≤ capacity {cap}"
+        );
+    }
+
+    /// `cap_insert` enforces the 32_768-entry cap on the bounded result
+    /// caches. We populate just past the cap and assert the map size never
+    /// exceeds it.
+    #[test]
+    fn cap_insert_enforces_max_result_entries() {
+        let map: RwLock<HashMap<u64, u64>> = RwLock::new(HashMap::new());
+        // Push exactly `MAX_RESULT_ENTRIES + 16` entries.
+        for i in 0..(MAX_RESULT_ENTRIES as u64 + 16) {
+            cap_insert(&map, i, i);
+        }
+        let len = map.read().len();
+        assert_eq!(
+            len, MAX_RESULT_ENTRIES,
+            "cap_insert must hold the map at exactly MAX_RESULT_ENTRIES"
+        );
+    }
+
+    /// Concurrent `get_or_load` from many tasks for the SAME key must not
+    /// panic; the cache is internally synchronized by moka.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn segment_cache_concurrent_get_insert_safe() {
+        let store: Arc<dyn BlobStore> = Arc::new(InMemoryStore::default());
+        let bytes = build_tiny_segment(7, 10);
+        store
+            .put("seg/shared", Bytes::from(bytes))
+            .await
+            .unwrap();
+
+        let cache = SegmentCache::new(64);
+        let mut handles = Vec::new();
+        for _ in 0..32 {
+            let c = cache.clone();
+            let s = store.clone();
+            handles.push(tokio::spawn(async move {
+                c.get_or_load("seg/shared", s).await
+            }));
+        }
+        for h in handles {
+            let extras = h.await.unwrap().unwrap();
+            assert_eq!(extras.reader.metadata.tenant_id.0, 7);
+        }
+        cache.inner.run_pending_tasks().await;
+        // Even with 32 concurrent loads the cache holds one entry.
+        assert_eq!(cache.inner.entry_count(), 1);
+    }
+}

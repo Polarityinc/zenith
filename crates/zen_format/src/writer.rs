@@ -181,3 +181,185 @@ impl SegmentWriter {
         Ok(buf.freeze())
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use zen_common::{CommitId, PartitionId, SchemaFingerprint, SpanId, TenantId, TraceId};
+    use zen_index::ZoneMap;
+
+    use crate::hotcache::{ColumnHotcacheEntry, Hotcache, RowGroupHotcacheEntry};
+    use crate::page::{encode_page, ColumnValues, PageEncoding};
+    use crate::reader::SegmentReader;
+    use crate::row_group::RowGroupBuilder;
+
+    use super::*;
+
+    /// Build a vanilla `SegmentMetadata` for tests; no observations recorded.
+    fn make_meta() -> SegmentMetadata {
+        SegmentMetadata::new(
+            1,
+            TenantId(1),
+            PartitionId(0),
+            SchemaFingerprint(0xABCD),
+            vec!["start_time_ms".into(), "model".into()],
+            vec!["start_time_ms".into()],
+        )
+    }
+
+    /// Build one trivial row group: column 0 is i64, column 1 is dict-encoded strings.
+    fn make_row_group(rows: &[(i64, &[u8])]) -> (RowGroupHeader, Vec<u8>) {
+        let mut rgb = RowGroupBuilder::new(rows.len() as u32);
+        let times: Vec<i64> = rows.iter().map(|(t, _)| *t).collect();
+        let (e, b) = encode_page(ColumnValues::I64(times), PageEncoding::For).expect("For encode");
+        rgb.add_page(0, e, b.to_vec(), 8 * rows.len() as u64);
+        let models: Vec<Vec<u8>> = rows.iter().map(|(_, m)| m.to_vec()).collect();
+        let (e, b) = encode_page(ColumnValues::StringsOwned(models), PageEncoding::Dict)
+            .expect("Dict encode");
+        rgb.add_page(1, e, b.to_vec(), 32);
+        let (payload, header) = rgb.finish();
+        (header, payload)
+    }
+
+    /// `SegmentWriter::new` + `add_row_group` + `finish` produces bytes the reader
+    /// opens with the expected row count.
+    #[test]
+    fn writer_finish_opens_in_reader() {
+        let mut writer = SegmentWriter::new(make_meta());
+        let (header, payload) = make_row_group(&[(1000, b"gpt-4o"), (2000, b"haiku")]);
+        writer.add_row_group(header, payload);
+        let bytes = writer.finish().expect("finish").to_vec();
+        let r = SegmentReader::from_bytes(bytes).expect("reader open");
+        assert_eq!(r.row_group_count(), 1);
+        assert_eq!(r.metadata.row_count, 2);
+    }
+
+    /// An empty writer (no row groups) finishes successfully and the reader sees zero RGs.
+    #[test]
+    fn writer_empty_segment_finishes() {
+        let writer = SegmentWriter::new(make_meta());
+        let bytes = writer.finish().expect("finish empty").to_vec();
+        let r = SegmentReader::from_bytes(bytes).expect("reader open");
+        assert_eq!(r.row_group_count(), 0);
+        assert_eq!(r.metadata.row_count, 0);
+    }
+
+    /// Writing 3 row groups makes all of them addressable via `row_group(0..N)`.
+    #[test]
+    fn writer_multiple_row_groups_reachable() {
+        let mut writer = SegmentWriter::new(make_meta());
+        for batch in [
+            &[(100i64, &b"a"[..]), (101, &b"b"[..])][..],
+            &[(200, &b"c"[..])][..],
+            &[(300, &b"d"[..]), (301, &b"e"[..]), (302, &b"f"[..])][..],
+        ] {
+            let (h, p) = make_row_group(batch);
+            writer.add_row_group(h, p);
+        }
+        let bytes = writer.finish().expect("finish").to_vec();
+        let r = SegmentReader::from_bytes(bytes).expect("open");
+        assert_eq!(r.row_group_count(), 3);
+        for i in 0..3 {
+            let rg = r.row_group(i).expect("row_group lookup");
+            assert!(rg.header.row_count >= 1);
+        }
+        // Total rows match the sum.
+        assert_eq!(r.metadata.row_count, 2 + 1 + 3);
+    }
+
+    /// `set_inline_indexes` survives roundtripping through the writer/reader:
+    /// the bytes appear at the offset/length recorded in the footer.
+    #[test]
+    fn writer_inline_indexes_roundtrip() {
+        let mut writer = SegmentWriter::new(make_meta());
+        let (h, p) = make_row_group(&[(1, b"x")]);
+        writer.add_row_group(h, p);
+        let blob = b"\xDE\xAD\xBE\xEF--inline-indexes-blob--".to_vec();
+        writer.set_inline_indexes(blob.clone());
+        let bytes = writer.finish().expect("finish").to_vec();
+        let r = SegmentReader::from_bytes(bytes).expect("open");
+        let off = r.footer.inline_indexes_offset as usize;
+        let len = r.footer.inline_indexes_length as usize;
+        assert_eq!(len, blob.len(), "inline_indexes length mismatch");
+        assert_eq!(&r.bytes[off..off + len], blob.as_slice());
+    }
+
+    /// A non-default `Hotcache` set on the writer is readable via the reader's
+    /// `hotcache` field.
+    #[test]
+    fn writer_hotcache_is_readable() {
+        let mut writer = SegmentWriter::new(make_meta());
+        let (h, p) = make_row_group(&[(1, b"y")]);
+        writer.add_row_group(h.clone(), p);
+        let entry = ColumnHotcacheEntry {
+            column_idx: 0,
+            zone_map: ZoneMap::from_i64(&[1, 2, 3], 0),
+            posting_offset: Some(42),
+            posting_length: Some(7),
+            fts_offset: None,
+            fts_length: None,
+            jsonpath_offset: None,
+            jsonpath_length: None,
+            hnsw_offset: None,
+            hnsw_length: None,
+        };
+        let mut hc = Hotcache::new();
+        hc.row_groups.push(RowGroupHotcacheEntry {
+            row_group_idx: 0,
+            header: h,
+            columns: vec![entry.clone()],
+        });
+        writer.set_hotcache(hc);
+        let bytes = writer.finish().expect("finish").to_vec();
+        let r = SegmentReader::from_bytes(bytes).expect("open");
+        assert_eq!(r.hotcache.row_groups.len(), 1);
+        assert_eq!(r.hotcache.row_groups[0].columns[0], entry);
+    }
+
+    /// Metadata observations recorded before `finish` survive into the reader's
+    /// `SegmentMetadata`.
+    #[test]
+    fn writer_metadata_observations_preserved() {
+        let mut meta = make_meta();
+        meta.observe_time(50);
+        meta.observe_time(2000);
+        meta.observe_commit(CommitId(3));
+        meta.observe_commit(CommitId(99));
+        meta.observe_trace_id(TraceId([0x10; 16]));
+        meta.observe_trace_id(TraceId([0x80; 16]));
+        meta.observe_span_id(SpanId([0x00; 16]));
+        meta.observe_span_id(SpanId([0xFF; 16]));
+        let mut writer = SegmentWriter::new(meta);
+        let (h, p) = make_row_group(&[(60, b"a"), (1900, b"b")]);
+        writer.add_row_group(h, p);
+        let bytes = writer.finish().expect("finish").to_vec();
+        let r = SegmentReader::from_bytes(bytes).expect("open");
+        assert_eq!(r.metadata.time_min_ms, 50);
+        assert_eq!(r.metadata.time_max_ms, 2000);
+        assert_eq!(r.metadata.commit_id_min, CommitId(3));
+        assert_eq!(r.metadata.commit_id_max, CommitId(99));
+        assert_eq!(r.metadata.trace_id_min, TraceId([0x10; 16]));
+        assert_eq!(r.metadata.trace_id_max, TraceId([0x80; 16]));
+        assert_eq!(r.metadata.span_id_min, SpanId([0x00; 16]));
+        assert_eq!(r.metadata.span_id_max, SpanId([0xFF; 16]));
+    }
+
+    /// The writer's footer CRC32 is non-zero and the same content produced
+    /// twice yields identical bytes (deterministic emit).
+    #[test]
+    fn writer_finish_is_deterministic() {
+        let make = || {
+            let mut w = SegmentWriter::new(make_meta());
+            let (h, p) = make_row_group(&[(10, b"q"), (20, b"r")]);
+            w.add_row_group(h, p);
+            w.finish().expect("finish").to_vec()
+        };
+        let a = make();
+        let b = make();
+        assert_eq!(a, b, "writer must emit deterministic bytes");
+        let r = SegmentReader::from_bytes(a).expect("open");
+        assert!(
+            r.footer.content_crc32 != 0,
+            "expected a non-zero content CRC32"
+        );
+    }
+}
