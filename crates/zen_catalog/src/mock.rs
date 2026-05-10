@@ -83,10 +83,22 @@ impl Catalog for MockCatalog {
         tenant: TenantId,
         partition: PartitionId,
     ) -> ZenResult<CommitId> {
+        self.next_commit_range(tenant, partition, 1).await
+    }
+
+    async fn next_commit_range(
+        &self,
+        tenant: TenantId,
+        partition: PartitionId,
+        count: u64,
+    ) -> ZenResult<CommitId> {
+        if count == 0 {
+            return Err(ZenError::invalid("commit range count must be positive"));
+        }
         // Fast path: counter exists.
         {
             if let Some(c) = self.inner.commit_seq.read().get(&(tenant, partition)) {
-                return Ok(CommitId(c.fetch_add(1, Ordering::SeqCst)));
+                return Ok(CommitId(c.fetch_add(count, Ordering::SeqCst)));
             }
         }
         // Slow path: create.
@@ -94,7 +106,7 @@ impl Catalog for MockCatalog {
         let c = g
             .entry((tenant, partition))
             .or_insert_with(|| Arc::new(AtomicU64::new(1)));
-        Ok(CommitId(c.fetch_add(1, Ordering::SeqCst)))
+        Ok(CommitId(c.fetch_add(count, Ordering::SeqCst)))
     }
 
     async fn register_wal_object(&self, w: WalObjectRow) -> ZenResult<()> {
@@ -302,6 +314,23 @@ mod tests {
         for w in all.windows(2) {
             assert!(w[0] != w[1], "duplicate commit_id {}", w[0]);
         }
+    }
+
+    #[tokio::test]
+    async fn next_commit_range_reserves_contiguous_ids() {
+        let c = MockCatalog::new();
+        c.ensure_partition(TenantId(1), PartitionId(0))
+            .await
+            .unwrap();
+
+        let first = c
+            .next_commit_range(TenantId(1), PartitionId(0), 5)
+            .await
+            .unwrap();
+        let next = c.next_commit_id(TenantId(1), PartitionId(0)).await.unwrap();
+
+        assert_eq!(first, CommitId(1));
+        assert_eq!(next, CommitId(6));
     }
 
     #[tokio::test]

@@ -127,6 +127,12 @@ async fn handle_ingest_inner(
             ),
         ));
     }
+    if req.spans.is_empty() {
+        return Ok(Json(IngestResponse {
+            spans_accepted: 0,
+            wal_object_key: String::new(),
+        }));
+    }
     if req.spans.len() > MAX_SPANS_PER_REQUEST {
         return Err((
             StatusCode::PAYLOAD_TOO_LARGE,
@@ -155,7 +161,7 @@ async fn handle_ingest_inner(
     // Convert to SpanRecord and assign commit_ids.
     let commit_id = state
         .catalog
-        .next_commit_id(tenant, partition)
+        .next_commit_range(tenant, partition, n as u64)
         .await
         .map_err(http_err)?;
 

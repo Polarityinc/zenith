@@ -131,7 +131,7 @@ pub async fn handle_otlp_traces(
     let n = records.len();
     let commit_id = state
         .catalog
-        .next_commit_id(tenant, partition)
+        .next_commit_range(tenant, partition, n as u64)
         .await
         .map_err(http_err)?;
     for (i, r) in records.iter_mut().enumerate() {

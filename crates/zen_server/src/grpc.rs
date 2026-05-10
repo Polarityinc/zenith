@@ -52,7 +52,7 @@ impl IngestService for GrpcIngest {
         let commit_id = self
             .state
             .catalog
-            .next_commit_id(tenant, partition)
+            .next_commit_range(tenant, partition, n as u64)
             .await
             .map_err(|e| Status::internal(format!("{e}")))?;
 

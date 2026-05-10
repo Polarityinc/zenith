@@ -131,20 +131,39 @@ impl Catalog for PostgresCatalog {
         tenant: TenantId,
         partition: PartitionId,
     ) -> ZenResult<CommitId> {
-        // Atomic increment via UPSERT + RETURNING. The row lock
+        self.next_commit_range(tenant, partition, 1).await
+    }
+
+    async fn next_commit_range(
+        &self,
+        tenant: TenantId,
+        partition: PartitionId,
+        count: u64,
+    ) -> ZenResult<CommitId> {
+        if count == 0 {
+            return Err(ZenError::invalid("commit range count must be positive"));
+        }
+        let count_i64 =
+            i64::try_from(count).map_err(|_| ZenError::catalog("commit range too large"))?;
+        let initial_next = count_i64
+            .checked_add(1)
+            .ok_or_else(|| ZenError::catalog("commit range overflow"))?;
+        // Atomic range reservation via UPSERT + RETURNING. The row lock
         // serializes concurrent writers without deadlock risk.
         let row: (i64,) = sqlx::query_as(
             "INSERT INTO commit_seq_state (tenant_id, partition_id, next_commit_id)
-             VALUES ($1, $2, 2)
+             VALUES ($1, $2, $3)
              ON CONFLICT (tenant_id, partition_id) DO UPDATE
-                SET next_commit_id = commit_seq_state.next_commit_id + 1
-             RETURNING next_commit_id - 1",
+                SET next_commit_id = commit_seq_state.next_commit_id + $4
+             RETURNING next_commit_id - $4",
         )
         .bind(tenant.0 as i64)
         .bind(partition.0 as i64)
+        .bind(initial_next)
+        .bind(count_i64)
         .fetch_one(&self.pool)
         .await
-        .map_err(|e| ZenError::catalog(format!("next_commit_id: {e}")))?;
+        .map_err(|e| ZenError::catalog(format!("next_commit_range: {e}")))?;
         Ok(CommitId(row.0 as u64))
     }
 

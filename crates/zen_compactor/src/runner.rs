@@ -452,8 +452,12 @@ async fn publish_compacted_segment(
     Ok((rows.len(), segment_bytes.len() as u64))
 }
 
-fn sparse_rowgroup_index_from_segment(segment_bytes: &[u8]) -> ZenResult<Vec<u8>> {
+pub fn sparse_rowgroup_index_from_segment(segment_bytes: &[u8]) -> ZenResult<Vec<u8>> {
     let reader = SegmentReader::from_bytes(segment_bytes.to_vec())?;
+    sparse_rowgroup_index_from_reader(&reader)
+}
+
+pub fn sparse_rowgroup_index_from_reader(reader: &SegmentReader) -> ZenResult<Vec<u8>> {
     let mut sparse = SparseRowGroupIndex::new();
     for (i, _rg) in reader.row_groups.iter().enumerate() {
         if let Some(rg_hc) = reader.hotcache.row_groups.get(i) {

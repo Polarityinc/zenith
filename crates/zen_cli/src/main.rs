@@ -248,6 +248,13 @@ async fn cmd_admin_restore(config_path: PathBuf, tenant: u64, from: PathBuf) -> 
             anyhow::bail!("manifest segment path escapes backup root: {path:?}");
         }
         let bytes = std::fs::read(&path)?;
+        let byte_count = bytes.len() as i64;
+        let reader = zen_format::SegmentReader::from_bytes(bytes.clone()).with_context(|| {
+            format!("restore: failed to read segment metadata for {segment_id}")
+        })?;
+        let rowgroup_index = zen_compactor::sparse_rowgroup_index_from_reader(&reader)
+            .with_context(|| format!("restore: failed to rebuild sparse index for {segment_id}"))?;
+        let meta = reader.metadata.clone();
         store.put(&object_key, bytes::Bytes::from(bytes)).await?;
         catalog
             .register_segment(SegmentRow {
@@ -256,16 +263,16 @@ async fn cmd_admin_restore(config_path: PathBuf, tenant: u64, from: PathBuf) -> 
                 partition_id: zen_common::PartitionId(0),
                 object_key: object_key.clone(),
                 level: s["level"].as_i64().unwrap_or(0) as i16,
-                byte_count: s["byte_count"].as_i64().unwrap_or(0),
-                row_count: s["row_count"].as_i64().unwrap_or(0),
-                time_min: s["time_min"].as_i64().unwrap_or(0),
-                time_max: s["time_max"].as_i64().unwrap_or(0),
-                trace_id_min: zen_common::TraceId([0u8; 16]),
-                trace_id_max: zen_common::TraceId([0xff; 16]),
-                commit_id_min: zen_common::CommitId(s["commit_id_min"].as_u64().unwrap_or(0)),
-                commit_id_max: zen_common::CommitId(s["commit_id_max"].as_u64().unwrap_or(0)),
-                schema_fingerprint: zen_common::SchemaFingerprint(0),
-                rowgroup_index: Vec::new(),
+                byte_count,
+                row_count: i64::try_from(meta.row_count).unwrap_or(i64::MAX),
+                time_min: meta.time_min_ms,
+                time_max: meta.time_max_ms,
+                trace_id_min: meta.trace_id_min,
+                trace_id_max: meta.trace_id_max,
+                commit_id_min: meta.commit_id_min,
+                commit_id_max: meta.commit_id_max,
+                schema_fingerprint: meta.schema_fingerprint,
+                rowgroup_index,
                 superseded_at: None,
                 created_at: chrono::Utc::now(),
             })
