@@ -63,7 +63,7 @@ zen_crypto = { path = "crates/zen_crypto" }
 arrow = { version = "53", default-features = false, features = ["prettyprint", "ipc"] }
 arrow-array = "53"
 arrow-buffer = "53"
-arrow-schema = "53"
+arrow-schema = "58"
 arrow-ipc = "53"
 parquet = { version = "53", default-features = false, features = ["arrow", "snap", "zstd"] }
 
