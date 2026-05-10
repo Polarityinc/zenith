@@ -153,24 +153,49 @@ async fn flush_all_memtables(state: &zen_server::ServerState) {
         match mt.flush() {
             Ok(batch) if batch.num_rows() > 0 => {
                 let writer = zen_wal::WalWriter::new(state.store.clone());
-                let commit = match state.catalog.next_commit_id(tenant, partition).await {
-                    Ok(c) => c,
-                    Err(e) => {
-                        tracing::warn!(error=%e, ?tenant, ?partition, "shutdown: next_commit_id failed");
-                        continue;
-                    }
+                let Some(metadata) = wal_metadata_from_batch(&batch) else {
+                    tracing::warn!(
+                        ?tenant,
+                        ?partition,
+                        "shutdown: WAL metadata extraction failed"
+                    );
+                    continue;
                 };
-                if let Err(e) = writer
-                    .flush(
+                let (key, wal_bytes) = match writer
+                    .flush_with_size(
                         tenant,
                         partition,
-                        commit,
+                        metadata.commit_id_min,
                         zen_common::Schema::spans_v1().fingerprint(),
                         &batch,
                     )
                     .await
                 {
-                    tracing::warn!(error=%e, ?tenant, ?partition, "shutdown: WAL flush failed");
+                    Ok(pair) => pair,
+                    Err(e) => {
+                        tracing::warn!(error=%e, ?tenant, ?partition, "shutdown: WAL flush failed");
+                        continue;
+                    }
+                };
+                let row = zen_catalog::model::WalObjectRow {
+                    wal_id: uuid::Uuid::new_v4(),
+                    tenant_id: tenant,
+                    partition_id: partition,
+                    object_key: key.to_string(),
+                    commit_id_min: metadata.commit_id_min,
+                    commit_id_max: metadata.commit_id_max,
+                    byte_count: wal_bytes as i64,
+                    row_count: batch.num_rows() as i64,
+                    time_min: metadata.time_min,
+                    time_max: metadata.time_max,
+                    trace_id_min: metadata.trace_id_min,
+                    trace_id_max: metadata.trace_id_max,
+                    schema_fingerprint: zen_common::Schema::spans_v1().fingerprint(),
+                    consumed_at: None,
+                    created_at: chrono::Utc::now(),
+                };
+                if let Err(e) = state.catalog.register_wal_object(row).await {
+                    tracing::warn!(error=%e, ?tenant, ?partition, "shutdown: WAL catalog register failed");
                 }
             }
             Ok(_) => {} // empty memtable
@@ -179,4 +204,99 @@ async fn flush_all_memtables(state: &zen_server::ServerState) {
             }
         }
     }
+}
+
+struct WalBatchMetadata {
+    commit_id_min: zen_common::CommitId,
+    commit_id_max: zen_common::CommitId,
+    time_min: i64,
+    time_max: i64,
+    trace_id_min: zen_common::TraceId,
+    trace_id_max: zen_common::TraceId,
+}
+
+fn wal_metadata_from_batch(batch: &arrow_array::RecordBatch) -> Option<WalBatchMetadata> {
+    use arrow_array::{Array, FixedSizeBinaryArray, Int64Array, UInt64Array};
+
+    let schema = batch.schema();
+    let commit_idx = schema.index_of("commit_id").ok()?;
+    let commit = batch
+        .column(commit_idx)
+        .as_any()
+        .downcast_ref::<UInt64Array>()?;
+    let mut commit_min = u64::MAX;
+    let mut commit_max = 0u64;
+    for i in 0..batch.num_rows() {
+        if commit.is_null(i) {
+            continue;
+        }
+        let c = commit.value(i);
+        commit_min = commit_min.min(c);
+        commit_max = commit_max.max(c);
+    }
+    if commit_min == u64::MAX {
+        return None;
+    }
+
+    let mut time_min = i64::MIN;
+    let mut time_max = i64::MAX;
+    if let Ok(time_idx) = schema.index_of("start_time_ms") {
+        if let Some(times) = batch.column(time_idx).as_any().downcast_ref::<Int64Array>() {
+            let mut min_seen = i64::MAX;
+            let mut max_seen = i64::MIN;
+            for i in 0..batch.num_rows() {
+                if times.is_null(i) {
+                    continue;
+                }
+                let t = times.value(i);
+                min_seen = min_seen.min(t);
+                max_seen = max_seen.max(t);
+            }
+            if min_seen != i64::MAX {
+                time_min = min_seen;
+                time_max = max_seen;
+            }
+        }
+    }
+
+    let mut trace_id_min = zen_common::TraceId([0; 16]);
+    let mut trace_id_max = zen_common::TraceId([0xff; 16]);
+    if let Ok(trace_idx) = schema.index_of("trace_id") {
+        if let Some(trace_ids) = batch
+            .column(trace_idx)
+            .as_any()
+            .downcast_ref::<FixedSizeBinaryArray>()
+        {
+            let mut min_seen = [0xffu8; 16];
+            let mut max_seen = [0u8; 16];
+            let mut saw_trace = false;
+            for i in 0..batch.num_rows() {
+                if trace_ids.is_null(i) {
+                    continue;
+                }
+                let value = trace_ids.value(i);
+                if value.len() != 16 {
+                    continue;
+                }
+                let mut tid = [0u8; 16];
+                tid.copy_from_slice(value);
+                min_seen = min_seen.min(tid);
+                max_seen = max_seen.max(tid);
+                saw_trace = true;
+            }
+            if saw_trace {
+                trace_id_min = zen_common::TraceId(min_seen);
+                trace_id_max = zen_common::TraceId(max_seen);
+            }
+        }
+    }
+
+    Some(WalBatchMetadata {
+        commit_id_min: zen_common::CommitId(commit_min),
+        commit_id_max: zen_common::CommitId(commit_max),
+        time_min,
+        time_max,
+        trace_id_min,
+        trace_id_max,
+    })
 }

@@ -37,7 +37,16 @@ pub trait Catalog: Send + Sync + 'static {
     async fn ensure_partition(&self, tenant: TenantId, partition: PartitionId) -> ZenResult<()>;
 
     /// Allocate the next commit_id for `(tenant, partition)`. Strongly monotonic.
-    async fn next_commit_id(&self, tenant: TenantId, partition: PartitionId) -> ZenResult<CommitId>;
+    async fn next_commit_id(&self, tenant: TenantId, partition: PartitionId)
+        -> ZenResult<CommitId>;
+
+    /// Reserve a contiguous commit_id range and return the first id.
+    async fn next_commit_range(
+        &self,
+        tenant: TenantId,
+        partition: PartitionId,
+        count: u64,
+    ) -> ZenResult<CommitId>;
 
     /// Register a freshly-flushed WAL object.
     async fn register_wal_object(&self, w: WalObjectRow) -> ZenResult<()>;

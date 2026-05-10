@@ -201,7 +201,7 @@ ZenithDB is **alpha**. The core engine is feature-complete and runs the full ben
 - **Issues & feature requests** — [GitHub Issues](https://github.com/Polarityinc/zenith/issues)
 - **Discussions** — [GitHub Discussions](https://github.com/Polarityinc/zenith/discussions)
 - **Security disclosures** — see [SECURITY.md](SECURITY.md)
-- **Contact** — [support@polarity.cc](mailto:support@polarity.cc)
+- **Contact** — [support@polarity.so](mailto:support@polarity.so)
 
 ## Contributing
 

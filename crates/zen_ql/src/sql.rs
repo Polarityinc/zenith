@@ -31,7 +31,7 @@ fn parse_query(q: &Query, tenant_id: u64) -> Result<LogicalPlan, ZenError> {
         other => {
             return Err(ZenError::query(format!(
                 "only SELECT statements are supported (got {other:?})"
-            )))
+            )));
         }
     };
 
@@ -64,9 +64,11 @@ fn parse_query(q: &Query, tenant_id: u64) -> Result<LogicalPlan, ZenError> {
 
     // WHERE.
     if let Some(w) = &select.selection {
-        plan.predicate = Some(Predicate {
-            expr: parse_expr(w)?,
-        });
+        let expr = parse_expr(w)?;
+        let (time_min_ms, time_max_ms) = extract_time_range(&expr);
+        plan.time_min_ms = time_min_ms;
+        plan.time_max_ms = time_max_ms;
+        plan.predicate = strip_time_range_predicates(expr).map(|expr| Predicate { expr });
     }
 
     // GROUP BY.
@@ -94,6 +96,105 @@ fn parse_query(q: &Query, tenant_id: u64) -> Result<LogicalPlan, ZenError> {
         }
     }
     Ok(plan)
+}
+
+fn extract_time_range(expr: &Expr) -> (i64, i64) {
+    let mut lo = i64::MIN;
+    let mut hi = i64::MAX;
+    collect_time_range(expr, &mut lo, &mut hi);
+    (lo, hi)
+}
+
+fn collect_time_range(expr: &Expr, lo: &mut i64, hi: &mut i64) {
+    match expr {
+        Expr::And(left, right) => {
+            collect_time_range(left, lo, hi);
+            collect_time_range(right, lo, hi);
+        }
+        Expr::Eq(left, right) => {
+            if let Some(v) = start_time_cmp_value(left, right) {
+                *lo = (*lo).max(v);
+                *hi = (*hi).min(v);
+            }
+        }
+        Expr::Ge(left, right) => {
+            if let Some(v) = start_time_cmp_value(left, right) {
+                *lo = (*lo).max(v);
+            } else if let Some(v) = literal_cmp_start_time_value(left, right) {
+                *hi = (*hi).min(v);
+            }
+        }
+        Expr::Gt(left, right) => {
+            if let Some(v) = start_time_cmp_value(left, right) {
+                *lo = (*lo).max(v.saturating_add(1));
+            } else if let Some(v) = literal_cmp_start_time_value(left, right) {
+                *hi = (*hi).min(v.saturating_sub(1));
+            }
+        }
+        Expr::Le(left, right) => {
+            if let Some(v) = start_time_cmp_value(left, right) {
+                *hi = (*hi).min(v);
+            } else if let Some(v) = literal_cmp_start_time_value(left, right) {
+                *lo = (*lo).max(v);
+            }
+        }
+        Expr::Lt(left, right) => {
+            if let Some(v) = start_time_cmp_value(left, right) {
+                *hi = (*hi).min(v.saturating_sub(1));
+            } else if let Some(v) = literal_cmp_start_time_value(left, right) {
+                *lo = (*lo).max(v.saturating_add(1));
+            }
+        }
+        _ => {}
+    }
+}
+
+fn start_time_cmp_value(left: &Expr, right: &Expr) -> Option<i64> {
+    match (left, right) {
+        (Expr::Column(c), Expr::Literal(Literal::Int(v))) if c == "start_time_ms" => Some(*v),
+        _ => None,
+    }
+}
+
+fn literal_cmp_start_time_value(left: &Expr, right: &Expr) -> Option<i64> {
+    match (left, right) {
+        (Expr::Literal(Literal::Int(v)), Expr::Column(c)) if c == "start_time_ms" => Some(*v),
+        _ => None,
+    }
+}
+
+fn strip_time_range_predicates(expr: Expr) -> Option<Expr> {
+    if is_start_time_bound(&expr) {
+        return None;
+    }
+    match expr {
+        Expr::And(left, right) => {
+            match (
+                strip_time_range_predicates(*left),
+                strip_time_range_predicates(*right),
+            ) {
+                (Some(l), Some(r)) => Some(Expr::and(l, r)),
+                (Some(l), None) => Some(l),
+                (None, Some(r)) => Some(r),
+                (None, None) => None,
+            }
+        }
+        other => Some(other),
+    }
+}
+
+fn is_start_time_bound(expr: &Expr) -> bool {
+    match expr {
+        Expr::Eq(left, right)
+        | Expr::Ge(left, right)
+        | Expr::Gt(left, right)
+        | Expr::Le(left, right)
+        | Expr::Lt(left, right) => {
+            start_time_cmp_value(left, right).is_some()
+                || literal_cmp_start_time_value(left, right).is_some()
+        }
+        _ => false,
+    }
 }
 
 fn parse_projection(items: &[SelectItem]) -> Result<Projection, ZenError> {
@@ -375,5 +476,36 @@ mod tests {
             }
             other => panic!("expected JsonPathEq, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn extracts_start_time_bounds() {
+        let p = parse_sql(
+            "SELECT span_id FROM spans WHERE start_time_ms >= 1700 AND start_time_ms < 1800 AND status = 'error'",
+            1,
+        )
+        .unwrap();
+        assert_eq!(p.time_min_ms, 1700);
+        assert_eq!(p.time_max_ms, 1799);
+        assert!(p.predicate.is_some());
+        match p.predicate.unwrap().expr {
+            Expr::Eq(left, _) => match left.as_ref() {
+                Expr::Column(c) => assert_eq!(c, "status"),
+                other => panic!("expected status column, got {other:?}"),
+            },
+            other => panic!("expected remaining status predicate, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn extracts_reversed_start_time_bounds() {
+        let p = parse_sql(
+            "SELECT span_id FROM spans WHERE 1700 <= start_time_ms AND 1800 > start_time_ms",
+            1,
+        )
+        .unwrap();
+        assert_eq!(p.time_min_ms, 1700);
+        assert_eq!(p.time_max_ms, 1799);
+        assert!(p.predicate.is_none());
     }
 }

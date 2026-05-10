@@ -30,14 +30,40 @@ fn clamp_limit(limit: Option<u32>) -> Option<u32> {
     limit.map(|l| l.min(MAX_QUERY_LIMIT))
 }
 
+#[inline]
+fn has_empty_time_range(plan: &LogicalPlan) -> bool {
+    plan.time_min_ms > plan.time_max_ms
+}
+
+#[allow(clippy::field_reassign_with_default)]
+fn empty_result_set(plan: &LogicalPlan, start: Instant) -> ResultSet {
+    let mut stats = ResultStats::default();
+    stats.elapsed_ms = start.elapsed().as_millis() as u64;
+    let columns = if !plan.aggregates.is_empty() {
+        let mut columns = plan.group_by.clone();
+        for (label, agg) in &plan.aggregates {
+            columns.push(aggregate_label(label, agg));
+        }
+        columns
+    } else {
+        plan.projection.columns.clone().unwrap_or_default()
+    };
+    ResultSet {
+        columns,
+        rows: Vec::new(),
+        stats,
+    }
+}
+
 use std::sync::Arc;
 use std::time::Instant;
 
 use roaring::RoaringBitmap;
 
-use zen_catalog::{Catalog, SegmentRow};
+use zen_catalog::{model::WalObjectRow, Catalog, SegmentRow};
 use zen_common::{PartitionId, TenantId, ZenError, ZenResult};
 use zen_format::{ColumnValues, PageView, RowValue, SegmentReader};
+use zen_index::SparseRowGroupIndex;
 use zen_storage::BlobStore;
 
 use crate::expr::{Expr, Literal};
@@ -101,6 +127,11 @@ pub async fn execute_full(
     let mut plan = plan.clone();
     plan.limit = clamp_limit(plan.limit);
     let plan = &plan;
+    let start = Instant::now();
+    if has_empty_time_range(plan) {
+        return Ok(empty_result_set(plan, start));
+    }
+
     // Fast path: pure GROUP BY + COUNT(*), no ORDER BY. Bypass ResultRow
     // construction and operate directly on the dict-encoded group_by columns.
     if !plan.aggregates.is_empty()
@@ -113,7 +144,6 @@ pub async fn execute_full(
         return execute_count_aggregate(plan, catalog, store, seg_cache, list_cache).await;
     }
 
-    let start = Instant::now();
     let mut stats = ResultStats::default();
 
     let tenant = TenantId(plan.tenant_id);
@@ -150,38 +180,54 @@ pub async fn execute_full(
         } else {
             all_segments.iter().cloned().collect()
         };
-        stats.segments_scanned += segments.len() as u32;
+        let mut scan_segments = Vec::with_capacity(segments.len());
+        for seg in segments {
+            if let Some((row_groups, pruned)) =
+                sparse_row_group_candidates(&seg, trace_id_filter, plan)
+            {
+                stats.row_groups_pruned += pruned;
+                if row_groups.is_empty() {
+                    continue;
+                }
+                scan_segments.push((seg, Some(row_groups)));
+            } else {
+                scan_segments.push((seg, None));
+            }
+        }
+        stats.segments_scanned += scan_segments.len() as u32;
 
         if stop_after_limit {
-            for seg in segments.iter() {
+            for (seg, row_groups) in scan_segments {
                 let remaining = limit_rows.map(|l| l.saturating_sub(all_rows.len()));
                 if remaining == Some(0) {
                     break;
                 }
                 scan_one_segment(
-                    seg,
+                    &seg,
                     store.clone(),
                     seg_cache,
                     plan,
                     &mut all_rows,
                     &mut stats,
                     remaining,
+                    row_groups,
                 )
                 .await?;
                 if limit_rows.is_some_and(|l| all_rows.len() >= l) {
                     break;
                 }
             }
-        } else if segments.len() <= 1 {
-            for seg in segments.iter() {
+        } else if scan_segments.len() <= 1 {
+            for (seg, row_groups) in scan_segments {
                 scan_one_segment(
-                    seg,
+                    &seg,
                     store.clone(),
                     seg_cache,
                     plan,
                     &mut all_rows,
                     &mut stats,
                     None,
+                    row_groups,
                 )
                 .await?;
             }
@@ -195,8 +241,8 @@ pub async fn execute_full(
             let store = store.clone();
             let seg_cache = seg_cache.clone();
             let results: Vec<ZenResult<(Vec<ResultRow>, ResultStats)>> =
-                stream::iter(segments.into_iter())
-                    .map(|seg| {
+                stream::iter(scan_segments.into_iter())
+                    .map(|(seg, row_groups)| {
                         let store = store.clone();
                         let seg_cache = seg_cache.clone();
                         let plan = plan_clone.clone();
@@ -204,7 +250,7 @@ pub async fn execute_full(
                             let mut rows: Vec<ResultRow> = Vec::new();
                             let mut s = ResultStats::default();
                             scan_one_segment(
-                                &seg, store, &seg_cache, &plan, &mut rows, &mut s, None,
+                                &seg, store, &seg_cache, &plan, &mut rows, &mut s, None, row_groups,
                             )
                             .await
                             .map(|()| (rows, s))
@@ -303,6 +349,7 @@ pub async fn execute_full(
     })
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn scan_one_segment(
     seg: &SegmentRow,
     store: Arc<dyn BlobStore>,
@@ -311,11 +358,18 @@ async fn scan_one_segment(
     out: &mut Vec<ResultRow>,
     stats: &mut ResultStats,
     max_rows: Option<usize>,
+    preselected_row_groups: Option<Vec<usize>>,
 ) -> ZenResult<()> {
     let extras = seg_cache.get_or_load(&seg.object_key, store).await?;
     let reader = extras.reader.clone();
     let row_group_count = reader.row_group_count();
     if row_group_count <= 1 {
+        if preselected_row_groups
+            .as_ref()
+            .is_some_and(|row_groups| !row_groups.contains(&0))
+        {
+            return Ok(());
+        }
         if let Some(max_rows) = max_rows {
             if row_group_count == 0 || max_rows == 0 {
                 return Ok(());
@@ -340,7 +394,11 @@ async fn scan_one_segment(
         return Ok(());
     }
 
-    let (candidate_rgs, pre_pruned) = candidate_row_groups(&reader, plan);
+    let (candidate_rgs, pre_pruned) = if let Some(row_groups) = preselected_row_groups {
+        candidate_row_groups_from(&reader, plan, row_groups)
+    } else {
+        candidate_row_groups(&reader, plan)
+    };
     stats.row_groups_pruned += pre_pruned;
 
     if let Some(max_rows) = max_rows {
@@ -405,6 +463,17 @@ struct RgScanResult {
 }
 
 fn candidate_row_groups(reader: &SegmentReader, plan: &LogicalPlan) -> (Vec<usize>, u32) {
+    candidate_row_groups_from(reader, plan, 0..reader.row_group_count())
+}
+
+fn candidate_row_groups_from<I>(
+    reader: &SegmentReader,
+    plan: &LogicalPlan,
+    row_groups: I,
+) -> (Vec<usize>, u32)
+where
+    I: IntoIterator<Item = usize>,
+{
     let col_idx = |name: &str| -> Option<u32> {
         reader
             .metadata
@@ -416,7 +485,11 @@ fn candidate_row_groups(reader: &SegmentReader, plan: &LogicalPlan) -> (Vec<usiz
     let predicate = plan.predicate.as_ref().map(|p| &p.expr);
     let mut out = Vec::with_capacity(reader.row_group_count());
     let mut pruned = 0u32;
-    for rg_idx in 0..reader.row_group_count() {
+    for rg_idx in row_groups {
+        if rg_idx >= reader.row_group_count() {
+            pruned += 1;
+            continue;
+        }
         if let Some(expr) = predicate {
             if !zone_map_might_match(reader, &col_idx, rg_idx, expr) {
                 pruned += 1;
@@ -440,6 +513,56 @@ fn candidate_row_groups(reader: &SegmentReader, plan: &LogicalPlan) -> (Vec<usiz
         out.push(rg_idx);
     }
     (out, pruned)
+}
+
+fn sparse_row_group_candidates(
+    seg: &SegmentRow,
+    trace_id_filter: Option<[u8; 16]>,
+    plan: &LogicalPlan,
+) -> Option<(Vec<usize>, u32)> {
+    let has_time_range = plan.time_min_ms != i64::MIN || plan.time_max_ms != i64::MAX;
+    if trace_id_filter.is_none() && !has_time_range {
+        return None;
+    }
+    if seg.rowgroup_index.is_empty() {
+        return None;
+    }
+    let time_range = if has_time_range {
+        Some((plan.time_min_ms, plan.time_max_ms))
+    } else {
+        None
+    };
+    let (hits, total) = SparseRowGroupIndex::hits_from_serialized(
+        &seg.rowgroup_index,
+        trace_id_filter.as_ref(),
+        time_range,
+    )
+    .ok()?;
+    if total == 0 {
+        return None;
+    }
+
+    let pruned = total.saturating_sub(hits.len()) as u32;
+    Some((hits, pruned))
+}
+
+fn wal_object_might_match(
+    wal: &WalObjectRow,
+    trace_id_filter: Option<[u8; 16]>,
+    plan: &LogicalPlan,
+) -> bool {
+    if let Some(tid) = trace_id_filter {
+        if wal.trace_id_min.0 > tid || tid > wal.trace_id_max.0 {
+            return false;
+        }
+    }
+    #[allow(clippy::collapsible_if)]
+    if plan.time_min_ms != i64::MIN || plan.time_max_ms != i64::MAX {
+        if wal.time_max < plan.time_min_ms || wal.time_min > plan.time_max_ms {
+            return false;
+        }
+    }
+    true
 }
 
 fn scan_row_group(
@@ -648,7 +771,21 @@ async fn execute_count_aggregate(
         } else {
             all_segments.iter().cloned().collect()
         };
-        stats.segments_scanned += segments.len() as u32;
+        let mut scan_segments = Vec::with_capacity(segments.len());
+        for seg in segments {
+            if let Some((row_groups, pruned)) =
+                sparse_row_group_candidates(&seg, trace_id_filter, plan)
+            {
+                stats.row_groups_pruned += pruned;
+                if row_groups.is_empty() {
+                    continue;
+                }
+                scan_segments.push((seg, Some(row_groups)));
+            } else {
+                scan_segments.push((seg, None));
+            }
+        }
+        stats.segments_scanned += scan_segments.len() as u32;
 
         // Fan out small/medium segment sets fully for latency. At 1 TB+ a
         // partition can contain thousands of segments, so cap concurrency
@@ -662,22 +799,24 @@ async fn execute_count_aggregate(
         // Alias the per-segment count payload so clippy doesn't flag the
         // collected Vec as a "very complex type".
         type SegCount = (ahash::AHashMap<Vec<String>, i64>, ResultStats);
-        let results: Vec<ZenResult<SegCount>> = if segments.len() <= UNBOUNDED_FANOUT_LIMIT {
+        let results: Vec<ZenResult<SegCount>> = if scan_segments.len() <= UNBOUNDED_FANOUT_LIMIT {
             use futures::future::join_all;
-            let futs = segments.into_iter().map(|seg| {
+            let futs = scan_segments.into_iter().map(|(seg, row_groups)| {
                 let store = store_clone.clone();
                 let seg_cache = seg_cache_clone.clone();
                 let plan = plan_clone.clone();
-                async move { count_one_segment(&seg, store, &seg_cache, &plan).await }
+                async move { count_one_segment(&seg, store, &seg_cache, &plan, row_groups).await }
             });
             join_all(futs).await
         } else {
-            stream::iter(segments.into_iter())
-                .map(|seg| {
+            stream::iter(scan_segments.into_iter())
+                .map(|(seg, row_groups)| {
                     let store = store_clone.clone();
                     let seg_cache = seg_cache_clone.clone();
                     let plan = plan_clone.clone();
-                    async move { count_one_segment(&seg, store, &seg_cache, &plan).await }
+                    async move {
+                        count_one_segment(&seg, store, &seg_cache, &plan, row_groups).await
+                    }
                 })
                 .buffer_unordered(MAX_IN_FLIGHT)
                 .collect()
@@ -692,9 +831,9 @@ async fn execute_count_aggregate(
             }
         }
 
-        // Sync write visibility for COUNT GROUP BY: also count rows in
-        // unconsumed WAL files. We pull them as ResultRow then aggregate.
-        let wal_rows = scan_unconsumed_wals(
+        // Sync write visibility for COUNT GROUP BY: count WAL Arrow batches
+        // directly instead of materializing ResultRows and re-counting them.
+        let wal_counts = count_unconsumed_wals(
             &catalog,
             store.clone(),
             tenant,
@@ -703,21 +842,8 @@ async fn execute_count_aggregate(
             trace_id_filter,
         )
         .await?;
-        for row in wal_rows {
-            let key: Vec<String> = plan
-                .group_by
-                .iter()
-                .map(|c| {
-                    row.fields
-                        .get(c)
-                        .map(|v| match v {
-                            serde_json::Value::String(s) => s.clone(),
-                            other => other.to_string(),
-                        })
-                        .unwrap_or_default()
-                })
-                .collect();
-            *counts.entry(key).or_insert(0) += 1;
+        for (key, count) in wal_counts {
+            *counts.entry(key).or_insert(0) += count;
         }
     }
 
@@ -760,6 +886,7 @@ async fn count_one_segment(
     store: Arc<dyn BlobStore>,
     seg_cache: &SegmentCache,
     plan: &LogicalPlan,
+    preselected_row_groups: Option<Vec<usize>>,
 ) -> ZenResult<(ahash::AHashMap<Vec<String>, i64>, ResultStats)> {
     let extras = seg_cache.get_or_load(&seg.object_key, store).await?;
     let reader = &extras.reader;
@@ -768,8 +895,16 @@ async fn count_one_segment(
     // numeric or short-string keys we hit in aggregations (3-5× hash throughput).
     let mut counts: ahash::AHashMap<Vec<String>, i64> = ahash::AHashMap::with_capacity(64);
     let mut stats = ResultStats::default();
+    let has_prunable_bounds =
+        plan.predicate.is_some() || plan.time_min_ms != i64::MIN || plan.time_max_ms != i64::MAX;
+    let (candidate_rgs, pre_pruned) = match preselected_row_groups {
+        Some(row_groups) => candidate_row_groups_from(reader, plan, row_groups),
+        None if has_prunable_bounds => candidate_row_groups(reader, plan),
+        None => ((0..reader.row_group_count()).collect(), 0),
+    };
+    stats.row_groups_pruned += pre_pruned;
 
-    for rg_idx in 0..reader.row_group_count() {
+    for rg_idx in candidate_rgs {
         let row_count = reader.row_groups[rg_idx].row_count as usize;
         let col_idx = |name: &str| -> Option<u32> {
             reader
@@ -803,6 +938,16 @@ async fn count_one_segment(
                 use zen_format::PageView;
                 let view = reader.open_page(rg_idx, cols[0])?;
                 if let PageView::Dict(dec) = view {
+                    if let Some(pm) = extras.posting_map(rg_idx as u32, cols[0]) {
+                        for value in &dec.dict {
+                            let c = pm.get(value).map(|pl| pl.cardinality()).unwrap_or(0);
+                            if c > 0 {
+                                let s = String::from_utf8_lossy(value).into_owned();
+                                *counts.entry(vec![s]).or_insert(0) += c as i64;
+                            }
+                        }
+                        continue;
+                    }
                     let mut local: ahash::AHashMap<u32, i64> =
                         ahash::AHashMap::with_capacity(dec.dict.len());
                     for &k in dec.keys.iter().take(row_count) {
@@ -829,11 +974,24 @@ async fn count_one_segment(
         }
 
         // Compute mask.
-        let mask = if let Some(expr) = predicate {
+        let mut mask = if let Some(expr) = predicate {
             eval_predicate(&extras, &col_idx, rg_idx, expr, row_count, None)?
         } else {
             full_row_bitmap(row_count)
         };
+        if plan.time_min_ms != i64::MIN || plan.time_max_ms != i64::MAX {
+            if let Some(t_idx) = col_idx("start_time_ms") {
+                if let ColumnValues::I64(times) = reader.read_column(rg_idx, t_idx)? {
+                    let mut tmask = RoaringBitmap::new();
+                    for (i, t) in times.iter().enumerate() {
+                        if *t >= plan.time_min_ms && *t <= plan.time_max_ms {
+                            tmask.push(i as u32);
+                        }
+                    }
+                    mask &= tmask;
+                }
+            }
+        }
         if mask.is_empty() {
             stats.row_groups_pruned += 1;
             continue;
@@ -907,6 +1065,9 @@ fn extract_trace_id_filter(expr: &Expr) -> Option<[u8; 16]> {
         Expr::And(a, b) => extract_trace_id_filter(a).or_else(|| extract_trace_id_filter(b)),
         Expr::Eq(left, right) => match (left.as_ref(), right.as_ref()) {
             (Expr::Column(c), Expr::Literal(Literal::String(v))) if c == "trace_id" => {
+                parse_ulid_bytes(v)
+            }
+            (Expr::Literal(Literal::String(v)), Expr::Column(c)) if c == "trace_id" => {
                 parse_ulid_bytes(v)
             }
             _ => None,
@@ -1618,11 +1779,40 @@ async fn scan_unconsumed_wals(
     use zen_common::CommitId;
     use zen_wal::WalReader;
 
-    let wals = catalog
+    let wals: Vec<_> = catalog
         .list_wal_objects(tenant, partition, CommitId(0))
-        .await?;
+        .await?
+        .into_iter()
+        .filter(|wal| wal_object_might_match(wal, trace_id_filter, plan))
+        .collect();
     if wals.is_empty() {
         return Ok(Vec::new());
+    }
+
+    if can_stop_after_limit(plan) {
+        let limit = plan.limit.unwrap_or_default() as usize;
+        let mut out = Vec::new();
+        for wal in wals {
+            if out.len() >= limit {
+                break;
+            }
+            let bytes = match store.get(&wal.object_key).await {
+                Ok(b) => b,
+                Err(_) => continue,
+            };
+            let (_h, batches) = match WalReader::parse(&bytes) {
+                Ok(p) => p,
+                Err(_) => continue,
+            };
+            for batch in batches {
+                arrow_batch_to_rows(&batch, plan, trace_id_filter, &mut out)?;
+                if out.len() >= limit {
+                    out.truncate(limit);
+                    break;
+                }
+            }
+        }
+        return Ok(out);
     }
 
     use futures::stream::{self, StreamExt};
@@ -1661,6 +1851,206 @@ async fn scan_unconsumed_wals(
     Ok(out)
 }
 
+async fn count_unconsumed_wals(
+    catalog: &Arc<dyn Catalog>,
+    store: Arc<dyn BlobStore>,
+    tenant: TenantId,
+    partition: PartitionId,
+    plan: &LogicalPlan,
+    trace_id_filter: Option<[u8; 16]>,
+) -> ZenResult<ahash::AHashMap<Vec<String>, i64>> {
+    use futures::stream::{self, StreamExt};
+    use zen_common::CommitId;
+    use zen_wal::WalReader;
+
+    let wals: Vec<_> = catalog
+        .list_wal_objects(tenant, partition, CommitId(0))
+        .await?
+        .into_iter()
+        .filter(|wal| wal_object_might_match(wal, trace_id_filter, plan))
+        .collect();
+    if wals.is_empty() {
+        return Ok(ahash::AHashMap::new());
+    }
+
+    const MAX_IN_FLIGHT: usize = 64;
+    let plan_clone = plan.clone();
+    let store_clone = store.clone();
+    let results: Vec<ZenResult<ahash::AHashMap<Vec<String>, i64>>> = stream::iter(wals.into_iter())
+        .map(|wal| {
+            let store = store_clone.clone();
+            let plan = plan_clone.clone();
+            async move {
+                let bytes = match store.get(&wal.object_key).await {
+                    Ok(b) => b,
+                    Err(_) => return Ok(ahash::AHashMap::new()),
+                };
+                let (_h, batches) = match WalReader::parse(&bytes) {
+                    Ok(p) => p,
+                    Err(_) => return Ok(ahash::AHashMap::new()),
+                };
+                let mut counts = ahash::AHashMap::new();
+                for batch in batches {
+                    count_arrow_batch_groups(&batch, &plan, trace_id_filter, &mut counts)?;
+                }
+                Ok::<ahash::AHashMap<Vec<String>, i64>, zen_common::ZenError>(counts)
+            }
+        })
+        .buffer_unordered(MAX_IN_FLIGHT)
+        .collect()
+        .await;
+
+    let mut out = ahash::AHashMap::new();
+    for result in results {
+        for (key, count) in result? {
+            *out.entry(key).or_insert(0) += count;
+        }
+    }
+    Ok(out)
+}
+
+fn count_arrow_batch_groups(
+    batch: &arrow_array::RecordBatch,
+    plan: &LogicalPlan,
+    trace_id_filter: Option<[u8; 16]>,
+    counts: &mut ahash::AHashMap<Vec<String>, i64>,
+) -> ZenResult<()> {
+    use arrow_array::{
+        Array, FixedSizeBinaryArray, Int64Array, StringArray, UInt32Array, UInt64Array,
+    };
+
+    let schema = batch.schema();
+    let n = batch.num_rows();
+    let mut mask: Vec<bool> = vec![true; n];
+
+    if let Some(tid_filter) = trace_id_filter {
+        if let Ok(i) = schema.index_of("trace_id") {
+            if let Some(arr) = batch
+                .column(i)
+                .as_any()
+                .downcast_ref::<FixedSizeBinaryArray>()
+            {
+                for r in 0..n {
+                    if mask[r] && arr.value(r) != tid_filter {
+                        mask[r] = false;
+                    }
+                }
+            }
+        }
+    }
+    if plan.time_min_ms != i64::MIN || plan.time_max_ms != i64::MAX {
+        if let Ok(i) = schema.index_of("start_time_ms") {
+            if let Some(arr) = batch.column(i).as_any().downcast_ref::<Int64Array>() {
+                for r in 0..n {
+                    if mask[r] {
+                        if arr.is_null(r) {
+                            mask[r] = false;
+                            continue;
+                        }
+                        let t = arr.value(r);
+                        if t < plan.time_min_ms || t > plan.time_max_ms {
+                            mask[r] = false;
+                        }
+                    }
+                }
+            }
+        }
+    }
+    if let Some(pred) = &plan.predicate {
+        apply_pred_vectorized(batch, &schema, &pred.expr, &mut mask)?;
+    }
+
+    if plan.group_by.is_empty() {
+        let n = mask.iter().filter(|m| **m).count() as i64;
+        if n > 0 {
+            *counts.entry(Vec::new()).or_insert(0) += n;
+        }
+        return Ok(());
+    }
+
+    if plan.group_by.len() == 1 {
+        let idx = schema
+            .index_of(&plan.group_by[0])
+            .map_err(|_| zen_common::ZenError::query("group_by column missing"))?;
+        if let Some(arr) = batch.column(idx).as_any().downcast_ref::<StringArray>() {
+            let mut local: ahash::AHashMap<&str, i64> = ahash::AHashMap::with_capacity(32);
+            for row_idx in 0..n {
+                if !mask[row_idx] {
+                    continue;
+                }
+                let value = if arr.is_null(row_idx) {
+                    ""
+                } else {
+                    arr.value(row_idx)
+                };
+                *local.entry(value).or_insert(0) += 1;
+            }
+            for (value, count) in local {
+                *counts.entry(vec![value.to_string()]).or_insert(0) += count;
+            }
+            return Ok(());
+        }
+    }
+
+    enum GroupCol<'a> {
+        Str(&'a StringArray),
+        I64(&'a Int64Array),
+        U32(&'a UInt32Array),
+        U64(&'a UInt64Array),
+        Fix16(&'a FixedSizeBinaryArray),
+    }
+
+    let mut cols = Vec::with_capacity(plan.group_by.len());
+    for col_name in &plan.group_by {
+        let idx = schema
+            .index_of(col_name)
+            .map_err(|_| zen_common::ZenError::query("group_by column missing"))?;
+        let arr = batch.column(idx);
+        if let Some(a) = arr.as_any().downcast_ref::<StringArray>() {
+            cols.push(GroupCol::Str(a));
+        } else if let Some(a) = arr.as_any().downcast_ref::<Int64Array>() {
+            cols.push(GroupCol::I64(a));
+        } else if let Some(a) = arr.as_any().downcast_ref::<UInt32Array>() {
+            cols.push(GroupCol::U32(a));
+        } else if let Some(a) = arr.as_any().downcast_ref::<UInt64Array>() {
+            cols.push(GroupCol::U64(a));
+        } else if let Some(a) = arr.as_any().downcast_ref::<FixedSizeBinaryArray>() {
+            cols.push(GroupCol::Fix16(a));
+        } else {
+            return Err(zen_common::ZenError::query("unsupported group_by col type"));
+        }
+    }
+
+    for row_idx in 0..n {
+        if !mask[row_idx] {
+            continue;
+        }
+        let mut key = Vec::with_capacity(cols.len());
+        for col in &cols {
+            let value = match col {
+                GroupCol::Str(a) if !a.is_null(row_idx) => a.value(row_idx).to_string(),
+                GroupCol::I64(a) if !a.is_null(row_idx) => a.value(row_idx).to_string(),
+                GroupCol::U32(a) if !a.is_null(row_idx) => a.value(row_idx).to_string(),
+                GroupCol::U64(a) if !a.is_null(row_idx) => a.value(row_idx).to_string(),
+                GroupCol::Fix16(a) if !a.is_null(row_idx) => {
+                    let b = a.value(row_idx);
+                    if b.len() == 16 {
+                        let mut arr16 = [0u8; 16];
+                        arr16.copy_from_slice(b);
+                        ulid::Ulid::from(u128::from_be_bytes(arr16)).to_string()
+                    } else {
+                        String::new()
+                    }
+                }
+                _ => String::new(),
+            };
+            key.push(value);
+        }
+        *counts.entry(key).or_insert(0) += 1;
+    }
+    Ok(())
+}
+
 fn arrow_batch_to_rows(
     batch: &arrow_array::RecordBatch,
     plan: &LogicalPlan,
@@ -1691,6 +2081,24 @@ fn arrow_batch_to_rows(
                 for r in 0..n {
                     if mask[r] && arr.value(r) != tid_filter {
                         mask[r] = false;
+                    }
+                }
+            }
+        }
+    }
+    if plan.time_min_ms != i64::MIN || plan.time_max_ms != i64::MAX {
+        if let Ok(i) = schema.index_of("start_time_ms") {
+            if let Some(arr) = batch.column(i).as_any().downcast_ref::<Int64Array>() {
+                for r in 0..n {
+                    if mask[r] {
+                        if arr.is_null(r) {
+                            mask[r] = false;
+                            continue;
+                        }
+                        let t = arr.value(r);
+                        if t < plan.time_min_ms || t > plan.time_max_ms {
+                            mask[r] = false;
+                        }
                     }
                 }
             }
@@ -1991,7 +2399,10 @@ mod tests {
     use ulid::Ulid;
     use uuid::Uuid;
 
-    use zen_catalog::{model::WalObjectRow, Catalog, MockCatalog};
+    use zen_catalog::{
+        model::{WalObjectBounds, WalObjectRow},
+        Catalog, MockCatalog,
+    };
     use zen_common::{CommitId, Schema, SchemaFingerprint, SpanId, SpanRecord, TraceId};
     use zen_compactor::compact_partition;
     use zen_memtable::flush_to_record_batch;
@@ -2036,6 +2447,7 @@ mod tests {
         }
         let writer = WalWriter::new(store.clone());
         let batch = flush_to_record_batch(&rows).unwrap();
+        let bounds = WalObjectBounds::from_span_records(&rows);
         let key = writer
             .flush(
                 TenantId(1),
@@ -2056,6 +2468,10 @@ mod tests {
                 commit_id_max: CommitId(1),
                 byte_count: 0,
                 row_count: rows.len() as i64,
+                time_min: bounds.time_min,
+                time_max: bounds.time_max,
+                trace_id_min: bounds.trace_id_min,
+                trace_id_max: bounds.trace_id_max,
                 schema_fingerprint: SchemaFingerprint(0),
                 consumed_at: None,
                 created_at: Utc::now(),
@@ -2178,6 +2594,302 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn sparse_rowgroup_index_can_skip_object_fetch() {
+        use zen_index::sparse::{RowGroupKey, SparseRowGroupIndex};
+
+        let store: Arc<dyn BlobStore> = Arc::new(InMemoryStore::default());
+        let catalog: Arc<dyn Catalog> = Arc::new(MockCatalog::new());
+        catalog.ensure_tenant(TenantId(1), "t").await.unwrap();
+        catalog
+            .ensure_partition(TenantId(1), PartitionId(0))
+            .await
+            .unwrap();
+
+        let mut sparse = SparseRowGroupIndex::new();
+        let mut rg_min = [0u8; 16];
+        let mut rg_max = [0u8; 16];
+        rg_min[0] = 1;
+        rg_max[0] = 2;
+        sparse.push(RowGroupKey {
+            min_trace_id: rg_min,
+            max_trace_id: rg_max,
+            min_start_time: 1_000,
+            max_start_time: 2_000,
+            min_commit_id: 1,
+            max_commit_id: 10,
+        });
+
+        catalog
+            .register_segment(SegmentRow {
+                segment_id: Uuid::from_u128(Ulid::new().0),
+                tenant_id: TenantId(1),
+                partition_id: PartitionId(0),
+                object_key: "missing/segment.zseg".into(),
+                level: 1,
+                byte_count: 1,
+                row_count: 10,
+                time_min: 1_000,
+                time_max: 2_000,
+                trace_id_min: TraceId([0u8; 16]),
+                trace_id_max: TraceId([0xffu8; 16]),
+                commit_id_min: CommitId(1),
+                commit_id_max: CommitId(10),
+                schema_fingerprint: Schema::spans_v1().fingerprint(),
+                rowgroup_index: sparse.serialize().unwrap().to_vec(),
+                superseded_at: None,
+                created_at: Utc::now(),
+            })
+            .await
+            .unwrap();
+
+        let mut miss = [0u8; 16];
+        miss[0] = 9;
+        let plan = LogicalPlan {
+            tenant_id: 1,
+            partition_ids: vec![0],
+            projection: Projection::list(["trace_id".into(), "span_id".into()]),
+            predicate: Some(Predicate {
+                expr: Expr::eq(
+                    Expr::col("trace_id"),
+                    Expr::lit_str(TraceId(miss).to_string()),
+                ),
+            }),
+            time_min_ms: 0,
+            time_max_ms: i64::MAX,
+            ..Default::default()
+        };
+
+        let rs = execute(&plan, catalog, store).await.unwrap();
+        assert!(rs.rows.is_empty());
+    }
+
+    #[tokio::test]
+    async fn impossible_time_range_returns_without_object_fetch() {
+        let store: Arc<dyn BlobStore> = Arc::new(InMemoryStore::default());
+        let catalog: Arc<dyn Catalog> = Arc::new(MockCatalog::new());
+        catalog.ensure_tenant(TenantId(1), "t").await.unwrap();
+        catalog
+            .ensure_partition(TenantId(1), PartitionId(0))
+            .await
+            .unwrap();
+        catalog
+            .register_segment(SegmentRow {
+                segment_id: Uuid::from_u128(Ulid::new().0),
+                tenant_id: TenantId(1),
+                partition_id: PartitionId(0),
+                object_key: "missing/impossible-time.zseg".into(),
+                level: 1,
+                byte_count: 1,
+                row_count: 10,
+                time_min: 0,
+                time_max: 100,
+                trace_id_min: TraceId([0u8; 16]),
+                trace_id_max: TraceId([0xffu8; 16]),
+                commit_id_min: CommitId(1),
+                commit_id_max: CommitId(10),
+                schema_fingerprint: Schema::spans_v1().fingerprint(),
+                rowgroup_index: Vec::new(),
+                superseded_at: None,
+                created_at: Utc::now(),
+            })
+            .await
+            .unwrap();
+
+        let plan = LogicalPlan {
+            tenant_id: 1,
+            partition_ids: vec![0],
+            projection: Projection::list(["span_id".into()]),
+            time_min_ms: 10,
+            time_max_ms: 5,
+            ..Default::default()
+        };
+        let rs = execute(&plan, catalog, store).await.unwrap();
+        assert!(rs.rows.is_empty());
+    }
+
+    #[test]
+    fn trace_id_filter_handles_literal_on_left() {
+        let mut tid = [0u8; 16];
+        tid[15] = 42;
+        let expr = Expr::eq(
+            Expr::lit_str(TraceId(tid).to_string()),
+            Expr::col("trace_id"),
+        );
+        assert_eq!(extract_trace_id_filter(&expr), Some(tid));
+    }
+
+    #[test]
+    fn wal_pruning_metadata_rejects_non_overlapping_bounds() {
+        let wal = WalObjectRow {
+            wal_id: Uuid::from_u128(Ulid::new().0),
+            tenant_id: TenantId(1),
+            partition_id: PartitionId(0),
+            object_key: "wal".into(),
+            commit_id_min: CommitId(1),
+            commit_id_max: CommitId(10),
+            byte_count: 1,
+            row_count: 10,
+            time_min: 1_000,
+            time_max: 2_000,
+            trace_id_min: TraceId([0x10; 16]),
+            trace_id_max: TraceId([0x20; 16]),
+            schema_fingerprint: Schema::spans_v1().fingerprint(),
+            consumed_at: None,
+            created_at: Utc::now(),
+        };
+        let time_miss = LogicalPlan {
+            time_min_ms: 3_000,
+            time_max_ms: 4_000,
+            ..Default::default()
+        };
+        assert!(!wal_object_might_match(&wal, None, &time_miss));
+
+        let trace_miss = [0x30; 16];
+        let time_hit = LogicalPlan {
+            time_min_ms: 1_500,
+            time_max_ms: 1_600,
+            ..Default::default()
+        };
+        assert!(!wal_object_might_match(&wal, Some(trace_miss), &time_hit));
+        assert!(wal_object_might_match(&wal, Some([0x18; 16]), &time_hit));
+    }
+
+    #[tokio::test]
+    async fn unconsumed_wal_scan_respects_time_bounds() {
+        let store: Arc<dyn BlobStore> = Arc::new(InMemoryStore::default());
+        let catalog: Arc<dyn Catalog> = Arc::new(MockCatalog::new());
+        catalog.ensure_tenant(TenantId(1), "t").await.unwrap();
+        catalog
+            .ensure_partition(TenantId(1), PartitionId(0))
+            .await
+            .unwrap();
+
+        let mut rows = Vec::new();
+        for i in 0..10u32 {
+            let mut sid = [0u8; 16];
+            sid[0..4].copy_from_slice(&i.to_be_bytes());
+            let mut r = SpanRecord::new(TenantId(1), PartitionId(0));
+            r.span_id = SpanId(sid);
+            r.start_time_ms = 1_000 + i as i64;
+            r.end_time_ms = r.start_time_ms + 1;
+            r.commit_id = CommitId(i as u64 + 1);
+            rows.push(r);
+        }
+        let batch = flush_to_record_batch(&rows).unwrap();
+        let bounds = WalObjectBounds::from_span_records(&rows);
+        let writer = WalWriter::new(store.clone());
+        let (key, wal_bytes) = writer
+            .flush_with_size(
+                TenantId(1),
+                PartitionId(0),
+                CommitId(1),
+                Schema::spans_v1().fingerprint(),
+                &batch,
+            )
+            .await
+            .unwrap();
+        catalog
+            .register_wal_object(WalObjectRow {
+                wal_id: Uuid::from_u128(Ulid::new().0),
+                tenant_id: TenantId(1),
+                partition_id: PartitionId(0),
+                object_key: key.to_string(),
+                commit_id_min: CommitId(1),
+                commit_id_max: CommitId(10),
+                byte_count: wal_bytes as i64,
+                row_count: rows.len() as i64,
+                time_min: bounds.time_min,
+                time_max: bounds.time_max,
+                trace_id_min: bounds.trace_id_min,
+                trace_id_max: bounds.trace_id_max,
+                schema_fingerprint: Schema::spans_v1().fingerprint(),
+                consumed_at: None,
+                created_at: Utc::now(),
+            })
+            .await
+            .unwrap();
+
+        let plan = LogicalPlan {
+            tenant_id: 1,
+            partition_ids: vec![0],
+            projection: Projection::list(["span_id".into(), "start_time_ms".into()]),
+            time_min_ms: 1_003,
+            time_max_ms: 1_005,
+            limit: Some(100),
+            ..Default::default()
+        };
+
+        let rs = execute(&plan, catalog, store).await.unwrap();
+        let times: Vec<i64> = rs
+            .rows
+            .iter()
+            .filter_map(|r| r.fields.get("start_time_ms").and_then(|v| v.as_i64()))
+            .collect();
+        assert_eq!(times, vec![1_003, 1_004, 1_005]);
+    }
+
+    #[tokio::test]
+    async fn aggregate_sparse_rowgroup_index_can_skip_object_fetch() {
+        use zen_index::sparse::{RowGroupKey, SparseRowGroupIndex};
+
+        let store: Arc<dyn BlobStore> = Arc::new(InMemoryStore::default());
+        let catalog: Arc<dyn Catalog> = Arc::new(MockCatalog::new());
+        catalog.ensure_tenant(TenantId(1), "t").await.unwrap();
+        catalog
+            .ensure_partition(TenantId(1), PartitionId(0))
+            .await
+            .unwrap();
+
+        let mut sparse = SparseRowGroupIndex::new();
+        sparse.push(RowGroupKey {
+            min_trace_id: [0u8; 16],
+            max_trace_id: [0xffu8; 16],
+            min_start_time: 1_000,
+            max_start_time: 2_000,
+            min_commit_id: 1,
+            max_commit_id: 10,
+        });
+
+        catalog
+            .register_segment(SegmentRow {
+                segment_id: Uuid::from_u128(Ulid::new().0),
+                tenant_id: TenantId(1),
+                partition_id: PartitionId(0),
+                object_key: "missing/aggregate-segment.zseg".into(),
+                level: 1,
+                byte_count: 1,
+                row_count: 10,
+                time_min: 0,
+                time_max: 5_000,
+                trace_id_min: TraceId([0u8; 16]),
+                trace_id_max: TraceId([0xffu8; 16]),
+                commit_id_min: CommitId(1),
+                commit_id_max: CommitId(10),
+                schema_fingerprint: Schema::spans_v1().fingerprint(),
+                rowgroup_index: sparse.serialize().unwrap().to_vec(),
+                superseded_at: None,
+                created_at: Utc::now(),
+            })
+            .await
+            .unwrap();
+
+        let plan = LogicalPlan {
+            tenant_id: 1,
+            partition_ids: vec![0],
+            projection: Projection::star(),
+            predicate: None,
+            time_min_ms: 3_000,
+            time_max_ms: 4_000,
+            group_by: vec!["model".into()],
+            aggregates: vec![("count".into(), AggregateFn::Count)],
+            ..Default::default()
+        };
+
+        let rs = execute(&plan, catalog, store).await.unwrap();
+        assert!(rs.rows.is_empty());
+    }
+
+    #[tokio::test]
     async fn aggregation_count_by_model() {
         let (catalog, store) = setup_indexed_segment().await;
         let plan = LogicalPlan {
@@ -2199,5 +2911,29 @@ mod tests {
             .filter_map(|r| r.fields.get("count").and_then(|v| v.as_i64()))
             .sum();
         assert_eq!(total, 50);
+    }
+
+    #[tokio::test]
+    async fn aggregation_count_respects_time_range() {
+        let (catalog, store) = setup_indexed_segment().await;
+        let plan = LogicalPlan {
+            tenant_id: 1,
+            partition_ids: vec![0],
+            projection: Projection::star(),
+            predicate: None,
+            time_min_ms: 1300,
+            time_max_ms: 1309,
+            group_by: vec!["model".into()],
+            aggregates: vec![("count".into(), AggregateFn::Count)],
+            ..Default::default()
+        };
+        let rs = execute(&plan, catalog, store).await.unwrap();
+        assert_eq!(rs.rows.len(), 2);
+        let total: i64 = rs
+            .rows
+            .iter()
+            .filter_map(|r| r.fields.get("count").and_then(|v| v.as_i64()))
+            .sum();
+        assert_eq!(total, 10);
     }
 }

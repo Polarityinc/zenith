@@ -148,6 +148,8 @@ impl PostingMap {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use proptest::prelude::*;
+    use std::collections::{BTreeSet, HashSet};
 
     #[test]
     fn posting_list_roundtrip() {
@@ -216,5 +218,147 @@ mod tests {
         let pl = m.get(b"C").unwrap();
         let posting: Vec<u32> = pl.iter().collect();
         assert_eq!(naive, posting);
+    }
+
+    // ---- Additional coverage ------------------------------------------------
+
+    #[test]
+    fn posting_map_lookup_returns_expected_bitmap() {
+        let pairs: &[(&[u8], u32)] = &[
+            (b"alpha", 1),
+            (b"beta", 2),
+            (b"alpha", 3),
+            (b"gamma", 4),
+            (b"alpha", 5),
+            (b"beta", 6),
+        ];
+        let mut m = PostingMap::new();
+        for (val, row) in pairs {
+            m.insert(val, *row);
+        }
+        let alpha = m.get(b"alpha").expect("alpha posting list missing");
+        let alpha_rows: Vec<u32> = alpha.iter().collect();
+        assert_eq!(alpha_rows, vec![1, 3, 5]);
+
+        let beta = m.get(b"beta").expect("beta posting list missing");
+        let beta_rows: Vec<u32> = beta.iter().collect();
+        assert_eq!(beta_rows, vec![2, 6]);
+
+        let gamma = m.get(b"gamma").expect("gamma posting list missing");
+        let gamma_rows: Vec<u32> = gamma.iter().collect();
+        assert_eq!(gamma_rows, vec![4]);
+    }
+
+    #[test]
+    fn posting_list_roundtrip_for_serialize_deserialize() {
+        let mut pl = PostingList::new();
+        for i in 0..1024u32 {
+            if i % 7 == 0 {
+                pl.push(i);
+            }
+        }
+        let original: Vec<u32> = pl.iter().collect();
+        let bytes = pl.serialize().expect("serialize");
+        let pl2 = PostingList::deserialize(&bytes).expect("deserialize");
+        let restored: Vec<u32> = pl2.iter().collect();
+        assert_eq!(original, restored);
+        assert_eq!(pl.cardinality(), pl2.cardinality());
+    }
+
+    #[test]
+    fn posting_list_intersection_is_correct() {
+        let mut a = PostingList::new();
+        for r in [1u32, 2, 3, 4, 5, 100, 101] {
+            a.push(r);
+        }
+        let mut b = PostingList::new();
+        for r in [3u32, 5, 7, 100, 200] {
+            b.push(r);
+        }
+        let mut intersection = a.clone();
+        intersection.and_assign(&b);
+        let v: Vec<u32> = intersection.iter().collect();
+        assert_eq!(v, vec![3, 5, 100]);
+
+        // Symmetric: B AND A is the same set.
+        let mut symmetric = b.clone();
+        symmetric.and_assign(&a);
+        let v2: Vec<u32> = symmetric.iter().collect();
+        assert_eq!(v2, vec![3, 5, 100]);
+    }
+
+    #[test]
+    fn posting_list_union_is_correct() {
+        let mut a = PostingList::new();
+        for r in [1u32, 3, 5, 7] {
+            a.push(r);
+        }
+        let mut b = PostingList::new();
+        for r in [2u32, 3, 4, 5, 6] {
+            b.push(r);
+        }
+        let mut union = a.clone();
+        union.or_assign(&b);
+        let v: Vec<u32> = union.iter().collect();
+        assert_eq!(v, vec![1, 2, 3, 4, 5, 6, 7]);
+    }
+
+    #[test]
+    fn posting_map_empty_lookup_returns_none() {
+        let m = PostingMap::new();
+        assert!(m.is_empty());
+        assert_eq!(m.len(), 0);
+        assert!(m.get(b"never_inserted").is_none());
+
+        // Serializing then deserializing the empty map is still empty.
+        let bytes = m.serialize().expect("serialize empty");
+        let m2 = PostingMap::deserialize(&bytes).expect("deserialize empty");
+        assert!(m2.is_empty());
+        assert!(m2.get(b"never_inserted").is_none());
+    }
+
+    proptest! {
+        #![proptest_config(ProptestConfig::with_cases(32))]
+
+        // Build a PostingMap for a small dictionary of random tags using
+        // 1..1024 random row indices, then verify the lookup output for
+        // every tag matches the naive groupby.
+        #[test]
+        fn proptest_random_inserts_match_naive_groupby(
+            entries in proptest::collection::vec((0u8..8u8, 0u32..10_000u32), 1..1024)
+        ) {
+            let mut m = PostingMap::new();
+            // Naive ground truth.
+            let mut naive: std::collections::HashMap<u8, BTreeSet<u32>> = Default::default();
+            for (tag, row) in &entries {
+                let value = format!("tag-{tag}");
+                m.insert(value.as_bytes(), *row);
+                naive.entry(*tag).or_default().insert(*row);
+            }
+
+            // Map's distinct value count <= 8 (one per tag).
+            prop_assert!(m.len() <= 8);
+
+            for (tag, expected_rows) in &naive {
+                let value = format!("tag-{tag}");
+                let pl = m.get(value.as_bytes())
+                    .unwrap_or_else(|| panic!("missing tag {tag}"));
+                let got_rows: HashSet<u32> = pl.iter().collect();
+                let exp_rows: HashSet<u32> = expected_rows.iter().copied().collect();
+                prop_assert_eq!(got_rows, exp_rows);
+            }
+
+            // Round trip through serialize / deserialize must preserve everything.
+            let bytes = m.serialize().expect("serialize");
+            let m2 = PostingMap::deserialize(&bytes).expect("deserialize");
+            prop_assert_eq!(m.len(), m2.len());
+            for (tag, expected_rows) in &naive {
+                let value = format!("tag-{tag}");
+                let pl = m2.get(value.as_bytes()).unwrap();
+                let got_rows: HashSet<u32> = pl.iter().collect();
+                let exp_rows: HashSet<u32> = expected_rows.iter().copied().collect();
+                prop_assert_eq!(got_rows, exp_rows);
+            }
+        }
     }
 }

@@ -156,3 +156,235 @@ pub fn serialize_dir(path: &Path) -> ZenResult<Bytes> {
 fn is_tantivy_lock_file(path: &str) -> bool {
     matches!(path, ".tantivy-writer.lock" | ".tantivy-meta.lock")
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::query::{open_fts_index, FtsQuery};
+
+    /// Two-field corpus: column 0 is "prompt", column 1 is "completion".
+    struct TwoFieldCorpus {
+        rows: Vec<(Option<String>, Option<String>)>,
+    }
+    impl FieldAccessor for TwoFieldCorpus {
+        fn field(&self, row: usize, field_idx: usize) -> Option<&str> {
+            let r = &self.rows[row];
+            match field_idx {
+                0 => r.0.as_deref(),
+                1 => r.1.as_deref(),
+                _ => None,
+            }
+        }
+        fn row_count(&self) -> usize {
+            self.rows.len()
+        }
+    }
+
+    /// Single-field corpus, useful for the multi-field-vs-single-field tests.
+    struct SingleField {
+        rows: Vec<String>,
+    }
+    impl FieldAccessor for SingleField {
+        fn field(&self, row: usize, field_idx: usize) -> Option<&str> {
+            if field_idx != 0 {
+                return None;
+            }
+            Some(&self.rows[row])
+        }
+        fn row_count(&self) -> usize {
+            self.rows.len()
+        }
+    }
+
+    fn fifty_doc_corpus() -> SingleField {
+        // 50 docs, every 5th one carries the marker word "alpha" so we can
+        // verify search after reopen; everything else is filler.
+        let rows: Vec<String> = (0..50)
+            .map(|i| {
+                if i % 5 == 0 {
+                    format!("doc {i} contains alpha word")
+                } else {
+                    format!("doc {i} contains beta filler")
+                }
+            })
+            .collect();
+        SingleField { rows }
+    }
+
+    #[test]
+    fn build_50_docs_returns_nonempty_blob() {
+        let acc = fifty_doc_corpus();
+        let opts = BuildOptions {
+            field_names: vec!["prompt".into()],
+            writer_memory_bytes: 15_000_000,
+        };
+        let res = build_fts_index(&acc, &opts).expect("build fts");
+        assert_eq!(res.doc_count, 50);
+        assert!(
+            !res.blob.is_empty(),
+            "serialized FTS blob must be non-empty"
+        );
+        assert!(
+            res.blob.len() > 200,
+            "blob should at least contain a manifest + segment files"
+        );
+    }
+
+    #[test]
+    fn reopened_blob_supports_search() {
+        let acc = fifty_doc_corpus();
+        let opts = BuildOptions {
+            field_names: vec!["prompt".into()],
+            writer_memory_bytes: 15_000_000,
+        };
+        let res = build_fts_index(&acc, &opts).expect("build");
+        let handle = open_fts_index(&res.blob).expect("open");
+
+        let q = FtsQuery {
+            field: Some("prompt"),
+            query: "alpha",
+            limit: 100,
+        };
+        let bm = handle.search_to_bitmap(&q).expect("search");
+        // Every 5th row was marked; expect 10 hits over 50 docs.
+        let mut hits: Vec<u32> = bm.iter().collect();
+        hits.sort_unstable();
+        assert_eq!(hits.len(), 10);
+        assert_eq!(hits, vec![0, 5, 10, 15, 20, 25, 30, 35, 40, 45]);
+    }
+
+    #[test]
+    fn empty_doc_list_builds_valid_empty_index() {
+        let acc = SingleField { rows: vec![] };
+        let opts = BuildOptions {
+            field_names: vec!["prompt".into()],
+            writer_memory_bytes: 15_000_000,
+        };
+        let res = build_fts_index(&acc, &opts).expect("build empty");
+        assert_eq!(res.doc_count, 0);
+        assert!(!res.blob.is_empty(), "even empty index has manifest bytes");
+
+        // The blob must be openable, and any query yields zero hits.
+        let handle = open_fts_index(&res.blob).expect("open empty");
+        let q = FtsQuery {
+            field: Some("prompt"),
+            query: "anything",
+            limit: 10,
+        };
+        let bm = handle.search_to_bitmap(&q).expect("search empty");
+        assert_eq!(bm.len(), 0);
+    }
+
+    #[test]
+    fn multi_field_index_makes_each_field_searchable() {
+        // Distinct vocabulary in each field so we can confirm each field is
+        // independently queryable after build + reopen.
+        let acc = TwoFieldCorpus {
+            rows: vec![
+                (
+                    Some("prompt mentions ratelimit".into()),
+                    Some("completion mentions oom".into()),
+                ),
+                (
+                    Some("prompt about latency".into()),
+                    Some("completion about throughput".into()),
+                ),
+                (
+                    Some("prompt about ratelimit again".into()),
+                    Some("completion about latency".into()),
+                ),
+            ],
+        };
+        let opts = BuildOptions {
+            field_names: vec!["prompt".into(), "completion".into()],
+            writer_memory_bytes: 15_000_000,
+        };
+        let res = build_fts_index(&acc, &opts).expect("build");
+        let handle = open_fts_index(&res.blob).expect("open");
+        // Both field names visible.
+        assert!(handle.field_names.contains(&"prompt".to_string()));
+        assert!(handle.field_names.contains(&"completion".to_string()));
+
+        // Search "ratelimit" in prompt: rows 0 and 2.
+        let q1 = FtsQuery {
+            field: Some("prompt"),
+            query: "ratelimit",
+            limit: 10,
+        };
+        let mut h1: Vec<u32> = handle
+            .search_to_bitmap(&q1)
+            .expect("search prompt")
+            .iter()
+            .collect();
+        h1.sort_unstable();
+        assert_eq!(h1, vec![0, 2]);
+
+        // Search "oom" in completion: row 0 only.
+        let q2 = FtsQuery {
+            field: Some("completion"),
+            query: "oom",
+            limit: 10,
+        };
+        let h2: Vec<u32> = handle
+            .search_to_bitmap(&q2)
+            .expect("search completion")
+            .iter()
+            .collect();
+        assert_eq!(h2, vec![0]);
+    }
+
+    #[test]
+    fn default_build_options_are_sensible() {
+        let opts = BuildOptions::default();
+        assert!(
+            !opts.field_names.is_empty(),
+            "default field_names must be non-empty"
+        );
+        // The default schema includes "prompt" and "completion" by name.
+        assert!(opts.field_names.iter().any(|f| f == "prompt"));
+        assert!(opts.field_names.iter().any(|f| f == "completion"));
+        assert!(
+            opts.writer_memory_bytes >= 15_000_000,
+            "writer memory must clear Tantivy's per-thread minimum"
+        );
+    }
+
+    #[test]
+    fn missing_field_names_returns_error() {
+        let acc = SingleField {
+            rows: vec!["only doc".into()],
+        };
+        let opts = BuildOptions {
+            field_names: vec![],
+            writer_memory_bytes: 15_000_000,
+        };
+        let r = build_fts_index(&acc, &opts);
+        assert!(r.is_err(), "empty field_names must fail fast");
+    }
+
+    #[test]
+    fn serialize_dir_round_trips_through_open() {
+        // Build through the public path; verify that what `serialize_dir`
+        // produces is parseable by `open_fts_index`. This guards against
+        // manifest format drift.
+        let acc = fifty_doc_corpus();
+        let opts = BuildOptions {
+            field_names: vec!["prompt".into()],
+            writer_memory_bytes: 15_000_000,
+        };
+        let res = build_fts_index(&acc, &opts).expect("build");
+        // Manifest length is the first u32 LE.
+        assert!(res.blob.len() > 4);
+        let manifest_len = u32::from_le_bytes([
+            res.blob[0],
+            res.blob[1],
+            res.blob[2],
+            res.blob[3],
+        ]) as usize;
+        assert!(manifest_len > 0);
+        assert!(4 + manifest_len <= res.blob.len(), "manifest must fit");
+
+        // And it opens cleanly.
+        let _handle = open_fts_index(&res.blob).expect("open after build");
+    }
+}

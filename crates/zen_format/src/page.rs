@@ -572,4 +572,250 @@ mod tests {
             _ => panic!(),
         }
     }
+
+    /// Raw `BytesOwned` pages encode and decode byte-for-byte.
+    #[test]
+    fn raw_byte_pages_roundtrip() {
+        let rows: Vec<Vec<u8>> = vec![
+            b"alpha".to_vec(),
+            Vec::new(),
+            b"".to_vec(),
+            b"the third row has spaces".to_vec(),
+        ];
+        let cv = ColumnValues::BytesOwned(rows.clone());
+        let (enc, bytes) = encode_page(cv, PageEncoding::Raw).expect("Raw encode");
+        assert_eq!(enc, PageEncoding::Raw);
+        match decode_page(enc, &bytes).expect("Raw decode") {
+            ColumnValues::BytesOwned(v) => assert_eq!(v, rows),
+            _ => panic!("expected BytesOwned"),
+        }
+    }
+
+    /// RLE i64 pages roundtrip correctly even with long runs.
+    #[test]
+    fn rle_i64_roundtrip() {
+        let mut v: Vec<i64> = vec![5; 20];
+        v.extend(vec![7; 3]);
+        v.extend(vec![5; 100]);
+        let (enc, bytes) =
+            encode_page(ColumnValues::I64(v.clone()), PageEncoding::Rle).expect("Rle encode");
+        assert_eq!(enc, PageEncoding::Rle);
+        match decode_page(enc, &bytes).expect("Rle decode") {
+            ColumnValues::I64(d) => assert_eq!(d, v),
+            _ => panic!("expected I64"),
+        }
+    }
+
+    /// Gorilla-encoded f64 pages roundtrip.
+    #[test]
+    fn gorilla_f64_roundtrip() {
+        let v: Vec<f64> = vec![1.0, 1.5, 1.55, 1.555, 2.0, -2.5, 0.0];
+        let (enc, bytes) = encode_page(ColumnValues::F64(v.clone()), PageEncoding::Gorilla)
+            .expect("Gorilla encode");
+        assert_eq!(enc, PageEncoding::Gorilla);
+        match decode_page(enc, &bytes).expect("Gorilla decode") {
+            ColumnValues::F64(d) => assert_eq!(d, v),
+            _ => panic!("expected F64"),
+        }
+    }
+
+    /// U32 column values widen to i64 losslessly through the For encoder.
+    #[test]
+    fn u32_for_promotes_to_i64() {
+        let v: Vec<u32> = vec![0, 100, 5000, u32::MAX, 42];
+        let (enc, bytes) =
+            encode_page(ColumnValues::U32(v.clone()), PageEncoding::For).expect("For/U32 encode");
+        assert_eq!(enc, PageEncoding::For);
+        match decode_page(enc, &bytes).expect("For decode") {
+            ColumnValues::I64(d) => {
+                let expected: Vec<i64> = v.into_iter().map(|x| x as i64).collect();
+                assert_eq!(d, expected);
+            }
+            _ => panic!("expected I64"),
+        }
+    }
+
+    /// FixedRaw with a header claiming N rows but a payload missing all rows
+    /// returns a structured error rather than panicking on the slice.
+    #[test]
+    fn fixed_raw_rejects_truncated_body() {
+        // Header says 10 rows of 16 bytes (160 bytes needed) but payload is empty.
+        let mut buf = Vec::new();
+        buf.extend_from_slice(&10u32.to_le_bytes());
+        let err = decode_page(PageEncoding::FixedRaw, &buf).expect_err("expected truncation error");
+        let msg = format!("{err}");
+        assert!(
+            msg.contains("FixedRaw page truncated"),
+            "expected truncation message, got: {msg}"
+        );
+    }
+
+    /// FixedRaw must reject row counts above MAX_PAGE_ROWS without allocating.
+    #[test]
+    fn fixed_raw_rejects_oversized_row_count() {
+        let mut buf = Vec::new();
+        buf.extend_from_slice(&((MAX_PAGE_ROWS + 1) as u32).to_le_bytes());
+        let err =
+            decode_page(PageEncoding::FixedRaw, &buf).expect_err("expected row-count cap error");
+        let msg = format!("{err}");
+        assert!(
+            msg.contains(&format!("> {MAX_PAGE_ROWS} max")),
+            "expected MAX_PAGE_ROWS cap message, got: {msg}"
+        );
+    }
+
+    /// Raw encoding rejects row counts above MAX_PAGE_ROWS before allocating.
+    #[test]
+    fn raw_rejects_oversized_row_count() {
+        let mut buf = Vec::new();
+        buf.extend_from_slice(&((MAX_PAGE_ROWS as u32) + 1).to_le_bytes());
+        let err = decode_page(PageEncoding::Raw, &buf).expect_err("expected Raw cap error");
+        let msg = format!("{err}");
+        assert!(
+            msg.contains(&format!("> {MAX_PAGE_ROWS} max")),
+            "expected MAX_PAGE_ROWS cap message, got: {msg}"
+        );
+    }
+
+    /// Zstd encoding rejects row counts above MAX_PAGE_ROWS in the inner header.
+    #[test]
+    fn zstd_rejects_oversized_row_count() {
+        // Build an inner Zstd payload whose header claims too many rows, then
+        // ZSTD-compress it so decode_page reaches the row-count check.
+        let mut inner = Vec::new();
+        inner.extend_from_slice(&((MAX_PAGE_ROWS as u32) + 1).to_le_bytes());
+        let compressed = zen_compress::zstd_compress(&inner, 3).expect("zstd compress");
+        let err = decode_page(PageEncoding::Zstd, &compressed).expect_err("expected Zstd cap");
+        let msg = format!("{err}");
+        assert!(
+            msg.contains(&format!("> {MAX_PAGE_ROWS} max")),
+            "expected MAX_PAGE_ROWS cap message, got: {msg}"
+        );
+    }
+
+    /// FixedRaw with `n = u32::MAX` must reject via the row-count cap (the
+    /// `checked_mul(16)` guard would also catch wrap-around if the cap were lifted).
+    #[test]
+    fn fixed_raw_rejects_u32_max_without_overflow() {
+        let mut buf = Vec::new();
+        buf.extend_from_slice(&u32::MAX.to_le_bytes());
+        let err = decode_page(PageEncoding::FixedRaw, &buf).expect_err("expected error");
+        // Must not panic / wrap to a small number; we accept either the row
+        // cap or the overflow guard since both protect against the same class
+        // of crafted input.
+        let msg = format!("{err}");
+        assert!(
+            msg.contains("max") || msg.contains("overflow"),
+            "expected cap/overflow message, got: {msg}"
+        );
+    }
+
+    /// Empty FixedRaw header (n=0) decodes to an empty Fixed16 vec, not a panic.
+    #[test]
+    fn fixed_raw_empty_decodes_to_empty() {
+        let mut buf = Vec::new();
+        buf.extend_from_slice(&0u32.to_le_bytes());
+        match decode_page(PageEncoding::FixedRaw, &buf).expect("empty FixedRaw") {
+            ColumnValues::Fixed16(v) => assert!(v.is_empty(), "expected empty Fixed16"),
+            _ => panic!("expected Fixed16"),
+        }
+    }
+
+    /// A zero-length input page returns a structured "header truncated" error,
+    /// never a panic, for both Raw and FixedRaw.
+    #[test]
+    fn empty_input_returns_structured_error() {
+        let err_raw = decode_page(PageEncoding::Raw, &[]).expect_err("Raw empty");
+        assert!(
+            format!("{err_raw}").contains("truncated"),
+            "expected truncation error for empty Raw"
+        );
+        let err_fx = decode_page(PageEncoding::FixedRaw, &[]).expect_err("FixedRaw empty");
+        assert!(
+            format!("{err_fx}").contains("truncated"),
+            "expected truncation error for empty FixedRaw"
+        );
+    }
+
+    /// `decode_one_row` returns the same value as `decode_page`'s nth element
+    /// for Raw, FixedRaw, For, and Rle encodings.
+    #[test]
+    fn decode_one_row_matches_decode_page() {
+        // Raw bytes
+        let rows: Vec<Vec<u8>> = (0..8).map(|i| format!("r{i}").into_bytes()).collect();
+        let (enc, bytes) =
+            encode_page(ColumnValues::BytesOwned(rows.clone()), PageEncoding::Raw).unwrap();
+        let full = decode_page(enc, &bytes).unwrap();
+        let one = decode_one_row(enc, &bytes, 5).unwrap();
+        match (full, one) {
+            (ColumnValues::BytesOwned(all), RowValue::Bytes(r5)) => assert_eq!(r5, all[5]),
+            _ => panic!("Raw mismatch"),
+        }
+        // FixedRaw
+        let fx: Vec<[u8; 16]> = (0..6).map(|i| [i as u8; 16]).collect();
+        let (enc, bytes) =
+            encode_page(ColumnValues::Fixed16(fx.clone()), PageEncoding::FixedRaw).unwrap();
+        let one = decode_one_row(enc, &bytes, 3).unwrap();
+        match one {
+            RowValue::Fixed16(r) => assert_eq!(r, fx[3]),
+            _ => panic!("FixedRaw mismatch"),
+        }
+        // For
+        let v = vec![10i64, 20, 30, 40];
+        let (enc, bytes) = encode_page(ColumnValues::I64(v.clone()), PageEncoding::For).unwrap();
+        let one = decode_one_row(enc, &bytes, 2).unwrap();
+        match one {
+            RowValue::I64(r) => assert_eq!(r, v[2]),
+            _ => panic!("For mismatch"),
+        }
+        // Rle
+        let v = vec![7i64; 16];
+        let (enc, bytes) = encode_page(ColumnValues::I64(v.clone()), PageEncoding::Rle).unwrap();
+        let one = decode_one_row(enc, &bytes, 9).unwrap();
+        match one {
+            RowValue::I64(r) => assert_eq!(r, v[9]),
+            _ => panic!("Rle mismatch"),
+        }
+    }
+
+    /// `PageEncoding::try_from_u8` rejects unknown tags with a structured error.
+    #[test]
+    fn page_encoding_try_from_unknown_byte() {
+        let err = PageEncoding::try_from_u8(99).expect_err("expected unknown encoding error");
+        assert!(format!("{err}").contains("unknown page encoding"));
+    }
+
+    proptest::proptest! {
+        /// Arbitrary `BytesOwned` vectors must roundtrip byte-for-byte through
+        /// both the Raw and Zstd encoders. This guards regressions in the page
+        /// codecs as the production code evolves.
+        #[test]
+        fn arbitrary_bytes_owned_roundtrip(
+            rows in proptest::collection::vec(
+                proptest::collection::vec(proptest::prelude::any::<u8>(), 0..256),
+                1..32,
+            ),
+        ) {
+            // Raw
+            let (enc, bytes) = encode_page(
+                ColumnValues::BytesOwned(rows.clone()),
+                PageEncoding::Raw,
+            ).expect("Raw encode");
+            let decoded = decode_page(enc, &bytes).expect("Raw decode");
+            match decoded {
+                ColumnValues::BytesOwned(v) => proptest::prop_assert_eq!(&v, &rows),
+                _ => proptest::prop_assert!(false, "Raw decoded wrong variant"),
+            }
+            // Zstd
+            let (enc, bytes) = encode_page(
+                ColumnValues::BytesOwned(rows.clone()),
+                PageEncoding::Zstd,
+            ).expect("Zstd encode");
+            let decoded = decode_page(enc, &bytes).expect("Zstd decode");
+            match decoded {
+                ColumnValues::BytesOwned(v) => proptest::prop_assert_eq!(&v, &rows),
+                _ => proptest::prop_assert!(false, "Zstd decoded wrong variant"),
+            }
+        }
+    }
 }

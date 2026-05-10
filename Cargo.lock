@@ -5854,9 +5854,12 @@ dependencies = [
  "zen_common",
  "zen_compactor",
  "zen_format",
+ "zen_index",
+ "zen_memtable",
  "zen_ql",
  "zen_query",
  "zen_storage",
+ "zen_wal",
 ]
 
 [[package]]
@@ -5905,6 +5908,7 @@ name = "zen_cli"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "arrow-array",
  "async-trait",
  "bytes",
  "chrono",
@@ -6119,6 +6123,7 @@ dependencies = [
  "reqwest",
  "serde",
  "serde_json",
+ "sqlx",
  "tempfile",
  "tokio",
  "uuid",
@@ -6162,11 +6167,13 @@ version = "0.1.0"
 dependencies = [
  "arrow",
  "arrow-array",
+ "arrow-ipc",
  "arrow-schema",
  "async-trait",
  "bytes",
  "criterion",
  "parking_lot",
+ "proptest",
  "roaring",
  "serde_json",
  "tempfile",
@@ -6221,6 +6228,7 @@ dependencies = [
  "arrow-array",
  "arrow-schema",
  "async-trait",
+ "bytes",
  "chrono",
  "criterion",
  "futures",
