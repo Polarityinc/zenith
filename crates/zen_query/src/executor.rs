@@ -831,9 +831,9 @@ async fn execute_count_aggregate(
             }
         }
 
-        // Sync write visibility for COUNT GROUP BY: also count rows in
-        // unconsumed WAL files. We pull them as ResultRow then aggregate.
-        let wal_rows = scan_unconsumed_wals(
+        // Sync write visibility for COUNT GROUP BY: count WAL Arrow batches
+        // directly instead of materializing ResultRows and re-counting them.
+        let wal_counts = count_unconsumed_wals(
             &catalog,
             store.clone(),
             tenant,
@@ -842,21 +842,8 @@ async fn execute_count_aggregate(
             trace_id_filter,
         )
         .await?;
-        for row in wal_rows {
-            let key: Vec<String> = plan
-                .group_by
-                .iter()
-                .map(|c| {
-                    row.fields
-                        .get(c)
-                        .map(|v| match v {
-                            serde_json::Value::String(s) => s.clone(),
-                            other => other.to_string(),
-                        })
-                        .unwrap_or_default()
-                })
-                .collect();
-            *counts.entry(key).or_insert(0) += 1;
+        for (key, count) in wal_counts {
+            *counts.entry(key).or_insert(0) += count;
         }
     }
 
@@ -951,17 +938,15 @@ async fn count_one_segment(
                 use zen_format::PageView;
                 let view = reader.open_page(rg_idx, cols[0])?;
                 if let PageView::Dict(dec) = view {
-                    if row_count >= 4_096 {
-                        if let Some(pm) = extras.posting_map(rg_idx as u32, cols[0]) {
-                            for value in &dec.dict {
-                                let c = pm.get(value).map(|pl| pl.cardinality()).unwrap_or(0);
-                                if c > 0 {
-                                    let s = String::from_utf8_lossy(value).into_owned();
-                                    *counts.entry(vec![s]).or_insert(0) += c as i64;
-                                }
+                    if let Some(pm) = extras.posting_map(rg_idx as u32, cols[0]) {
+                        for value in &dec.dict {
+                            let c = pm.get(value).map(|pl| pl.cardinality()).unwrap_or(0);
+                            if c > 0 {
+                                let s = String::from_utf8_lossy(value).into_owned();
+                                *counts.entry(vec![s]).or_insert(0) += c as i64;
                             }
-                            continue;
                         }
+                        continue;
                     }
                     let mut local: ahash::AHashMap<u32, i64> =
                         ahash::AHashMap::with_capacity(dec.dict.len());
@@ -1864,6 +1849,206 @@ async fn scan_unconsumed_wals(
         out.extend(r?);
     }
     Ok(out)
+}
+
+async fn count_unconsumed_wals(
+    catalog: &Arc<dyn Catalog>,
+    store: Arc<dyn BlobStore>,
+    tenant: TenantId,
+    partition: PartitionId,
+    plan: &LogicalPlan,
+    trace_id_filter: Option<[u8; 16]>,
+) -> ZenResult<ahash::AHashMap<Vec<String>, i64>> {
+    use futures::stream::{self, StreamExt};
+    use zen_common::CommitId;
+    use zen_wal::WalReader;
+
+    let wals: Vec<_> = catalog
+        .list_wal_objects(tenant, partition, CommitId(0))
+        .await?
+        .into_iter()
+        .filter(|wal| wal_object_might_match(wal, trace_id_filter, plan))
+        .collect();
+    if wals.is_empty() {
+        return Ok(ahash::AHashMap::new());
+    }
+
+    const MAX_IN_FLIGHT: usize = 64;
+    let plan_clone = plan.clone();
+    let store_clone = store.clone();
+    let results: Vec<ZenResult<ahash::AHashMap<Vec<String>, i64>>> = stream::iter(wals.into_iter())
+        .map(|wal| {
+            let store = store_clone.clone();
+            let plan = plan_clone.clone();
+            async move {
+                let bytes = match store.get(&wal.object_key).await {
+                    Ok(b) => b,
+                    Err(_) => return Ok(ahash::AHashMap::new()),
+                };
+                let (_h, batches) = match WalReader::parse(&bytes) {
+                    Ok(p) => p,
+                    Err(_) => return Ok(ahash::AHashMap::new()),
+                };
+                let mut counts = ahash::AHashMap::new();
+                for batch in batches {
+                    count_arrow_batch_groups(&batch, &plan, trace_id_filter, &mut counts)?;
+                }
+                Ok::<ahash::AHashMap<Vec<String>, i64>, zen_common::ZenError>(counts)
+            }
+        })
+        .buffer_unordered(MAX_IN_FLIGHT)
+        .collect()
+        .await;
+
+    let mut out = ahash::AHashMap::new();
+    for result in results {
+        for (key, count) in result? {
+            *out.entry(key).or_insert(0) += count;
+        }
+    }
+    Ok(out)
+}
+
+fn count_arrow_batch_groups(
+    batch: &arrow_array::RecordBatch,
+    plan: &LogicalPlan,
+    trace_id_filter: Option<[u8; 16]>,
+    counts: &mut ahash::AHashMap<Vec<String>, i64>,
+) -> ZenResult<()> {
+    use arrow_array::{
+        Array, FixedSizeBinaryArray, Int64Array, StringArray, UInt32Array, UInt64Array,
+    };
+
+    let schema = batch.schema();
+    let n = batch.num_rows();
+    let mut mask: Vec<bool> = vec![true; n];
+
+    if let Some(tid_filter) = trace_id_filter {
+        if let Ok(i) = schema.index_of("trace_id") {
+            if let Some(arr) = batch
+                .column(i)
+                .as_any()
+                .downcast_ref::<FixedSizeBinaryArray>()
+            {
+                for r in 0..n {
+                    if mask[r] && arr.value(r) != tid_filter {
+                        mask[r] = false;
+                    }
+                }
+            }
+        }
+    }
+    if plan.time_min_ms != i64::MIN || plan.time_max_ms != i64::MAX {
+        if let Ok(i) = schema.index_of("start_time_ms") {
+            if let Some(arr) = batch.column(i).as_any().downcast_ref::<Int64Array>() {
+                for r in 0..n {
+                    if mask[r] {
+                        if arr.is_null(r) {
+                            mask[r] = false;
+                            continue;
+                        }
+                        let t = arr.value(r);
+                        if t < plan.time_min_ms || t > plan.time_max_ms {
+                            mask[r] = false;
+                        }
+                    }
+                }
+            }
+        }
+    }
+    if let Some(pred) = &plan.predicate {
+        apply_pred_vectorized(batch, &schema, &pred.expr, &mut mask)?;
+    }
+
+    if plan.group_by.is_empty() {
+        let n = mask.iter().filter(|m| **m).count() as i64;
+        if n > 0 {
+            *counts.entry(Vec::new()).or_insert(0) += n;
+        }
+        return Ok(());
+    }
+
+    if plan.group_by.len() == 1 {
+        let idx = schema
+            .index_of(&plan.group_by[0])
+            .map_err(|_| zen_common::ZenError::query("group_by column missing"))?;
+        if let Some(arr) = batch.column(idx).as_any().downcast_ref::<StringArray>() {
+            let mut local: ahash::AHashMap<&str, i64> = ahash::AHashMap::with_capacity(32);
+            for row_idx in 0..n {
+                if !mask[row_idx] {
+                    continue;
+                }
+                let value = if arr.is_null(row_idx) {
+                    ""
+                } else {
+                    arr.value(row_idx)
+                };
+                *local.entry(value).or_insert(0) += 1;
+            }
+            for (value, count) in local {
+                *counts.entry(vec![value.to_string()]).or_insert(0) += count;
+            }
+            return Ok(());
+        }
+    }
+
+    enum GroupCol<'a> {
+        Str(&'a StringArray),
+        I64(&'a Int64Array),
+        U32(&'a UInt32Array),
+        U64(&'a UInt64Array),
+        Fix16(&'a FixedSizeBinaryArray),
+    }
+
+    let mut cols = Vec::with_capacity(plan.group_by.len());
+    for col_name in &plan.group_by {
+        let idx = schema
+            .index_of(col_name)
+            .map_err(|_| zen_common::ZenError::query("group_by column missing"))?;
+        let arr = batch.column(idx);
+        if let Some(a) = arr.as_any().downcast_ref::<StringArray>() {
+            cols.push(GroupCol::Str(a));
+        } else if let Some(a) = arr.as_any().downcast_ref::<Int64Array>() {
+            cols.push(GroupCol::I64(a));
+        } else if let Some(a) = arr.as_any().downcast_ref::<UInt32Array>() {
+            cols.push(GroupCol::U32(a));
+        } else if let Some(a) = arr.as_any().downcast_ref::<UInt64Array>() {
+            cols.push(GroupCol::U64(a));
+        } else if let Some(a) = arr.as_any().downcast_ref::<FixedSizeBinaryArray>() {
+            cols.push(GroupCol::Fix16(a));
+        } else {
+            return Err(zen_common::ZenError::query("unsupported group_by col type"));
+        }
+    }
+
+    for row_idx in 0..n {
+        if !mask[row_idx] {
+            continue;
+        }
+        let mut key = Vec::with_capacity(cols.len());
+        for col in &cols {
+            let value = match col {
+                GroupCol::Str(a) if !a.is_null(row_idx) => a.value(row_idx).to_string(),
+                GroupCol::I64(a) if !a.is_null(row_idx) => a.value(row_idx).to_string(),
+                GroupCol::U32(a) if !a.is_null(row_idx) => a.value(row_idx).to_string(),
+                GroupCol::U64(a) if !a.is_null(row_idx) => a.value(row_idx).to_string(),
+                GroupCol::Fix16(a) if !a.is_null(row_idx) => {
+                    let b = a.value(row_idx);
+                    if b.len() == 16 {
+                        let mut arr16 = [0u8; 16];
+                        arr16.copy_from_slice(b);
+                        ulid::Ulid::from(u128::from_be_bytes(arr16)).to_string()
+                    } else {
+                        String::new()
+                    }
+                }
+                _ => String::new(),
+            };
+            key.push(value);
+        }
+        *counts.entry(key).or_insert(0) += 1;
+    }
+    Ok(())
 }
 
 fn arrow_batch_to_rows(

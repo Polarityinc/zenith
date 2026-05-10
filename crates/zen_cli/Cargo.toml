@@ -23,6 +23,7 @@ zen_format = { workspace = true }
 zen_compactor = { workspace = true }
 zen_wal = { workspace = true }
 zen_crypto = { workspace = true }
+arrow-array = { workspace = true }
 bytes = { workspace = true }
 uuid = { workspace = true }
 reqwest = { workspace = true }

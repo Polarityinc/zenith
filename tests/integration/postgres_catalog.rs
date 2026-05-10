@@ -118,6 +118,15 @@ async fn postgres_catalog_full_contract() {
         );
     }
     assert_eq!(all.len(), 16 * 32);
+    let range_start = cat
+        .next_commit_range(TenantId(1), PartitionId(0), 7)
+        .await
+        .unwrap();
+    let after_range = cat
+        .next_commit_id(TenantId(1), PartitionId(0))
+        .await
+        .unwrap();
+    assert_eq!(after_range.0, range_start.0 + 7);
     eprintln!("  ✓ next_commit_id monotonic under 16-way × 32 fan-out");
 
     // ─── 2: segment register + range query.

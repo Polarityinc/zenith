@@ -8,4 +8,7 @@ pub mod runner;
 
 pub use build::{build_segment_from_iter, build_segment_from_rows, BuildOptions};
 pub use merge::{merge_wals, MergedRows};
-pub use runner::{compact_full, compact_partition, CompactionStats};
+pub use runner::{
+    compact_full, compact_partition, sparse_rowgroup_index_from_reader,
+    sparse_rowgroup_index_from_segment, CompactionStats,
+};

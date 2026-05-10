@@ -5908,6 +5908,7 @@ name = "zen_cli"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "arrow-array",
  "async-trait",
  "bytes",
  "chrono",
