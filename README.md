@@ -196,6 +196,8 @@ See [`examples/zenithdb.dev.toml`](examples/zenithdb.dev.toml) for the full conf
 
 ZenithDB is **alpha**. The core engine is feature-complete and runs the full benchmark suite, but on-disk format and wire protocols may still change before `1.0`. Track the [CHANGELOG](CHANGELOG.md) for breaking changes.
 
+**What "alpha" means for you:** safe to evaluate, benchmark, and run in dev/staging. Pre-`1.0` releases may require dump-and-reload across upgrades — we'll always call breaking changes out in the CHANGELOG, and provide a migration path where feasible. We don't yet recommend it as a primary store for production data you can't afford to re-ingest.
+
 ## Community
 
 - **Issues & feature requests** — [GitHub Issues](https://github.com/Polarityinc/zenith/issues)
