@@ -125,20 +125,37 @@ async fn auth_off_two_tenants_keep_their_rows_separate() {
     let store: Arc<dyn BlobStore> = Arc::new(InMemoryStore::default());
     let catalog: Arc<dyn Catalog> = Arc::new(MockCatalog::new());
     catalog.ensure_tenant(TenantId(1), "alpha").await.unwrap();
-    catalog.ensure_partition(TenantId(1), PartitionId(0)).await.unwrap();
+    catalog
+        .ensure_partition(TenantId(1), PartitionId(0))
+        .await
+        .unwrap();
     catalog.ensure_tenant(TenantId(2), "beta").await.unwrap();
-    catalog.ensure_partition(TenantId(2), PartitionId(0)).await.unwrap();
+    catalog
+        .ensure_partition(TenantId(2), PartitionId(0))
+        .await
+        .unwrap();
 
     let state = ServerState::new(Config::default(), catalog, store);
     let url = spawn(state).await;
     let client = reqwest::Client::new();
 
     assert_eq!(ingest(&client, &url, None, 1, 17, "gpt-4o").await, 200);
-    assert_eq!(ingest(&client, &url, None, 2, 5, "claude-opus-4-7").await, 200);
+    assert_eq!(
+        ingest(&client, &url, None, 2, 5, "claude-opus-4-7").await,
+        200
+    );
 
     // Tenant 1 sees its own 17 rows; tenant 2 sees its 5.
-    assert_eq!(count_rows(&client, &url, None, 1).await, 17, "tenant 1 row count");
-    assert_eq!(count_rows(&client, &url, None, 2).await, 5,  "tenant 2 row count");
+    assert_eq!(
+        count_rows(&client, &url, None, 1).await,
+        17,
+        "tenant 1 row count"
+    );
+    assert_eq!(
+        count_rows(&client, &url, None, 2).await,
+        5,
+        "tenant 2 row count"
+    );
 }
 
 #[tokio::test]
@@ -147,9 +164,15 @@ async fn auth_on_cross_tenant_query_is_403() {
     let store: Arc<dyn BlobStore> = Arc::new(InMemoryStore::default());
     let catalog: Arc<dyn Catalog> = Arc::new(MockCatalog::new());
     catalog.ensure_tenant(TenantId(1), "alpha").await.unwrap();
-    catalog.ensure_partition(TenantId(1), PartitionId(0)).await.unwrap();
+    catalog
+        .ensure_partition(TenantId(1), PartitionId(0))
+        .await
+        .unwrap();
     catalog.ensure_tenant(TenantId(2), "beta").await.unwrap();
-    catalog.ensure_partition(TenantId(2), PartitionId(0)).await.unwrap();
+    catalog
+        .ensure_partition(TenantId(2), PartitionId(0))
+        .await
+        .unwrap();
 
     let mut state = ServerState::new(Config::default(), catalog, store);
     let jwks: jsonwebtoken::jwk::JwkSet = serde_json::from_str(JWKS).unwrap();
@@ -193,7 +216,10 @@ async fn auth_on_segments_endpoint_is_tenant_scoped() {
     let store: Arc<dyn BlobStore> = Arc::new(InMemoryStore::default());
     let catalog: Arc<dyn Catalog> = Arc::new(MockCatalog::new());
     catalog.ensure_tenant(TenantId(1), "alpha").await.unwrap();
-    catalog.ensure_partition(TenantId(1), PartitionId(0)).await.unwrap();
+    catalog
+        .ensure_partition(TenantId(1), PartitionId(0))
+        .await
+        .unwrap();
     catalog.ensure_tenant(TenantId(9), "victim").await.unwrap();
 
     let mut state = ServerState::new(Config::default(), catalog, store);
@@ -230,7 +256,10 @@ async fn auth_on_compact_requires_admin_scope() {
     let store: Arc<dyn BlobStore> = Arc::new(InMemoryStore::default());
     let catalog: Arc<dyn Catalog> = Arc::new(MockCatalog::new());
     catalog.ensure_tenant(TenantId(1), "alpha").await.unwrap();
-    catalog.ensure_partition(TenantId(1), PartitionId(0)).await.unwrap();
+    catalog
+        .ensure_partition(TenantId(1), PartitionId(0))
+        .await
+        .unwrap();
 
     let mut state = ServerState::new(Config::default(), catalog, store);
     let jwks: jsonwebtoken::jwk::JwkSet = serde_json::from_str(JWKS).unwrap();
@@ -250,7 +279,11 @@ async fn auth_on_compact_requires_admin_scope() {
         .send()
         .await
         .unwrap();
-    assert_eq!(r.status().as_u16(), 403, "read scope must be rejected on compact");
+    assert_eq!(
+        r.status().as_u16(),
+        403,
+        "read scope must be rejected on compact"
+    );
 
     let r = client
         .post(format!("{url}/v1/compact"))
@@ -259,5 +292,8 @@ async fn auth_on_compact_requires_admin_scope() {
         .send()
         .await
         .unwrap();
-    assert!(r.status().is_success(), "admin scope must succeed on compact");
+    assert!(
+        r.status().is_success(),
+        "admin scope must succeed on compact"
+    );
 }

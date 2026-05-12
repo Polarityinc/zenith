@@ -186,8 +186,7 @@ mod tests {
             DataType::Utf8,
             true,
         )]));
-        let names: Vec<Option<&str>> =
-            (0..10_000).map(|_| Some("compressible-payload")).collect();
+        let names: Vec<Option<&str>> = (0..10_000).map(|_| Some("compressible-payload")).collect();
         let arr = Arc::new(StringArray::from(names));
         let batch = RecordBatch::try_new(schema.clone(), vec![arr]).unwrap();
 

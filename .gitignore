@@ -9,10 +9,10 @@ Cargo.lock.bak
 *.db-wal
 *.db-shm
 
-# Bench results (only commit baseline + leaderboard).
-/bench-results/*.json
-!/bench-results/baseline.json
-/bench-results/per-crate-old/
+# Bench results — kept local only. The folder is no longer tracked
+# in git; older snapshots and comparison harnesses live on developer
+# machines, not in the repo.
+/bench-results/
 
 # Editor / OS noise
 .DS_Store

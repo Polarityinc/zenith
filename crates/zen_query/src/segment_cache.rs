@@ -393,19 +393,16 @@ mod tests {
     async fn segment_cache_concurrent_get_insert_safe() {
         let store: Arc<dyn BlobStore> = Arc::new(InMemoryStore::default());
         let bytes = build_tiny_segment(7, 10);
-        store
-            .put("seg/shared", Bytes::from(bytes))
-            .await
-            .unwrap();
+        store.put("seg/shared", Bytes::from(bytes)).await.unwrap();
 
         let cache = SegmentCache::new(64);
         let mut handles = Vec::new();
         for _ in 0..32 {
             let c = cache.clone();
             let s = store.clone();
-            handles.push(tokio::spawn(async move {
-                c.get_or_load("seg/shared", s).await
-            }));
+            handles.push(tokio::spawn(
+                async move { c.get_or_load("seg/shared", s).await },
+            ));
         }
         for h in handles {
             let extras = h.await.unwrap().unwrap();
