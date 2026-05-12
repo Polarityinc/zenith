@@ -1,5 +1,5 @@
 <p align="center">
-  <a href="https://zenith.dev">
+  <a href="https://zenith.polarity.so">
     <img src=".github/assets/zenith.png" alt="ZenithDB" width="100%" />
   </a>
 </p>
@@ -183,10 +183,27 @@ The default profile runs entirely on your laptop with no external services:
 
 See [`examples/zenithdb.dev.toml`](examples/zenithdb.dev.toml) for the full config surface, and [`docs/RUNBOOK.md`](docs/RUNBOOK.md) for production tuning.
 
+## Console (web dashboard)
+
+ZenithDB ships with a minimal Next.js console under [`web/`](web) that
+talks to the engine's HTTP API. It exposes live segments, queries,
+compactions, WAL metrics, and a query runner — no fixtures, all real
+data.
+
+```bash
+cd web
+bun install
+bun dev   # http://localhost:3000
+```
+
+Configure the upstream via `ZENITH_URL` (default `http://localhost:8080`).
+
 ## Documentation
 
+- **[Architecture](docs/ARCHITECTURE.md)** — deep dive on the five moat crates and the design choices.
 - **[Runbook](docs/RUNBOOK.md)** — operator's guide.
 - **[Scaling 1 TB → 1 PB](docs/SCALING_1TB_1PB.md)** — sizing & topology notes.
+- **[Examples](examples)** — `zenithdb.dev.toml` config + Python and TypeScript quickstarts.
 - **[Changelog](CHANGELOG.md)** — what landed when.
 - **[Contributing](CONTRIBUTING.md)** — dev setup, conventions, PR workflow.
 - **[Security](SECURITY.md)** — vulnerability disclosure.
