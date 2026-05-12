@@ -34,7 +34,7 @@ rust-version = "1.87"
 authors = ["Polarity <support@polarity.so>"]
 license = "Apache-2.0"
 repository = "https://github.com/Polarityinc/zenith"
-homepage = "https://zenith.dev"
+homepage = "https://zenith.polarity.so"
 
 [workspace.dependencies]
 # Internal crates
