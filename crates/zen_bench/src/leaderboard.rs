@@ -24,7 +24,7 @@ impl Leaderboard {
         for r in results {
             let bs_p95 = bs
                 .get(r.name.as_str())
-                .map(|(_, p)| format!("{:.0}", p))
+                .map(|(_, p)| format!("{p:.0}"))
                 .unwrap_or_else(|| "(no ref)".into());
             s.push_str(&format!(
                 "| {} | {:.0} | {:.0} | {:.0} | {} | {} |\n",
