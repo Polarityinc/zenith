@@ -115,7 +115,7 @@ async fn spawn_node_with_secret(
 ) -> (String, NodeRegistry) {
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
-    let endpoint = format!("http://{}", addr);
+    let endpoint = format!("http://{addr}");
 
     let reg = NodeRegistry::new(
         NodeId::new(),
@@ -180,7 +180,7 @@ async fn three_node_cluster_serves_queries_from_any_node() {
     let mut totals: Vec<i64> = Vec::new();
     for url in [&a_url, &b_url, &c_url] {
         let r: serde_json::Value = client
-            .post(format!("{}/v1/query", url))
+            .post(format!("{url}/v1/query"))
             .json(&body)
             .send()
             .await
@@ -230,7 +230,7 @@ async fn three_node_cluster_with_hmac_inter_node_auth() {
 
     for url in [&a_url, &b_url, &c_url] {
         let r: serde_json::Value = client
-            .post(format!("{}/v1/query", url))
+            .post(format!("{url}/v1/query"))
             .json(&body)
             .send()
             .await

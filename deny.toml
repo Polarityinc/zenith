@@ -23,6 +23,11 @@ ignore = [
 ]
 
 [licenses]
+# Our internal test crates (zen_chaos_tests, zen_integration_tests,
+# zen_perf_tests) are unpublished helpers — `publish = false`. Skip
+# license checks for them; deny still enforces the allowlist on every
+# external dep.
+private = { ignore = true }
 allow = [
   "MIT",
   "Apache-2.0",
