@@ -201,7 +201,13 @@ mod tests {
             .expect("start_time_ms column");
 
         let actual: Vec<(u8, i64, u8)> = (0..batch.num_rows())
-            .map(|i| (trace_col.value(i)[0], start_col.value(i), span_col.value(i)[0]))
+            .map(|i| {
+                (
+                    trace_col.value(i)[0],
+                    start_col.value(i),
+                    span_col.value(i)[0],
+                )
+            })
             .collect();
         let mut expected = actual.clone();
         expected.sort();

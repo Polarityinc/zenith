@@ -20,7 +20,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@1.88.0
+      - uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt
       - run: cargo fmt --all --check
@@ -30,10 +30,12 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@1.88.0
+      - uses: dtolnay/rust-toolchain@stable
         with:
           components: clippy
       - uses: Swatinem/rust-cache@v2
+      - name: install protoc
+        run: sudo apt-get update && sudo apt-get install -y protobuf-compiler
       - run: cargo clippy --workspace --all-targets -- -D warnings
 
   test:
@@ -41,7 +43,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@1.88.0
+      - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
       - name: install protoc
         run: sudo apt-get update && sudo apt-get install -y protobuf-compiler
@@ -52,19 +54,16 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@1.88.0
-      - uses: Swatinem/rust-cache@v2
-      - name: install cargo-audit
-        run: cargo install --locked cargo-audit
-      - run: cargo audit --deny warnings
+      - uses: rustsec/audit-check@v2.0.0
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
 
   deny:
     name: deny
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@1.88.0
-      - uses: Swatinem/rust-cache@v2
-      - name: install cargo-deny
-        run: cargo install --locked cargo-deny
-      - run: cargo deny check
+      - uses: EmbarkStudios/cargo-deny-action@v2
+        with:
+          command: check
+          rust-version: stable

@@ -286,7 +286,11 @@ mod tests {
             !paths.is_empty(),
             "deep object should produce at least one discovered path"
         );
-        let deepest = paths.iter().map(|p| p.path.matches('.').count()).max().unwrap();
+        let deepest = paths
+            .iter()
+            .map(|p| p.path.matches('.').count())
+            .max()
+            .unwrap();
         assert!(deepest <= 50, "depth must be bounded by structure");
 
         // With the default (small) max_depth, the recursion still doesn't
