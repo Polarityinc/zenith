@@ -351,12 +351,7 @@ mod tests {
         let est = hll_distinct_u64(&v);
         // 1024-bucket HLL should be accurate to ~5% on 10K distinct.
         let err = (est as f64 - 10_000.0).abs() / 10_000.0;
-        assert!(
-            err < 0.10,
-            "HLL error {} for 10K distinct (est={})",
-            err,
-            est
-        );
+        assert!(err < 0.10, "HLL error {err} for 10K distinct (est={est})");
     }
 
     #[test]
