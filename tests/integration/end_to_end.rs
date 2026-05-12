@@ -104,7 +104,7 @@ async fn ingest_compact_query_end_to_end() {
     tokio::time::sleep(std::time::Duration::from_millis(50)).await;
 
     let client = reqwest::Client::new();
-    let url = format!("http://{}/v1/query", addr);
+    let url = format!("http://{addr}/v1/query");
     let body = serde_json::json!({
         "tenant_id": 1,
         "query": "SELECT model, count(*) FROM spans GROUP BY model"
