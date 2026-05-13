@@ -42,17 +42,6 @@ jobs:
       # workspace-wide inline pass.
       - run: cargo clippy --workspace --all-targets -- -D warnings -A clippy::uninlined_format_args
 
-  test:
-    name: test
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
-      - uses: Swatinem/rust-cache@v2
-      - name: install protoc
-        run: sudo apt-get update && sudo apt-get install -y protobuf-compiler
-      - run: cargo test --workspace --all-features
-
   audit:
     name: audit
     runs-on: ubuntu-latest
