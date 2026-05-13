@@ -1,0 +1,18 @@
+# NOTE: This file references GitHub teams under the Polarityinc org
+# (@polarityinc/maintainers, /storage-team, /security-team, /sre-team).
+# Each team must exist with write access on the repo — if a team is
+# missing GitHub silently drops the rule, so PRs touching those paths
+# will merge without the intended review gate. Swap for individual
+# @-handles if you don't want to manage GitHub teams.
+
+# Default reviewers for everything.
+*       @polarityinc/maintainers
+
+# Critical paths get a second pair of eyes.
+/crates/zen_storage/  @polarityinc/storage-team
+/crates/zen_format/   @polarityinc/storage-team
+/crates/zen_wal/      @polarityinc/storage-team
+/crates/zen_compactor/  @polarityinc/storage-team
+/crates/zen_auth/     @polarityinc/security-team
+/.github/             @polarityinc/security-team
+/deploy/              @polarityinc/sre-team

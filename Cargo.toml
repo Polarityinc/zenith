@@ -1,0 +1,206 @@
+[workspace]
+resolver = "2"
+members = [
+    "tests/integration",
+    "tests/perf",
+    "tests/chaos",
+    "crates/zen_common",
+    "crates/zen_proto",
+    "crates/zen_compress",
+    "crates/zen_format",
+    "crates/zen_index",
+    "crates/zen_fts",
+    "crates/zen_jsonpath",
+    "crates/zen_vector",
+    "crates/zen_storage",
+    "crates/zen_wal",
+    "crates/zen_memtable",
+    "crates/zen_catalog",
+    "crates/zen_compactor",
+    "crates/zen_query",
+    "crates/zen_ql",
+    "crates/zen_server",
+    "crates/zen_cli",
+    "crates/zen_bench",
+    "crates/zen_cluster",
+    "crates/zen_auth",
+    "crates/zen_crypto",
+]
+
+[workspace.package]
+version = "0.0.1"
+edition = "2021"
+rust-version = "1.87"
+authors = ["Polarity <support@polarity.so>"]
+license = "Apache-2.0"
+repository = "https://github.com/Polarityinc/zenith"
+homepage = "https://zenith.polarity.so"
+
+[workspace.dependencies]
+# Internal crates
+zen_common = { path = "crates/zen_common" }
+zen_proto = { path = "crates/zen_proto" }
+zen_compress = { path = "crates/zen_compress" }
+zen_format = { path = "crates/zen_format" }
+zen_index = { path = "crates/zen_index" }
+zen_fts = { path = "crates/zen_fts" }
+zen_jsonpath = { path = "crates/zen_jsonpath" }
+zen_vector = { path = "crates/zen_vector" }
+zen_storage = { path = "crates/zen_storage" }
+zen_wal = { path = "crates/zen_wal" }
+zen_memtable = { path = "crates/zen_memtable" }
+zen_catalog = { path = "crates/zen_catalog" }
+zen_compactor = { path = "crates/zen_compactor" }
+zen_query = { path = "crates/zen_query" }
+zen_ql = { path = "crates/zen_ql" }
+zen_server = { path = "crates/zen_server" }
+zen_bench = { path = "crates/zen_bench" }
+zen_cluster = { path = "crates/zen_cluster" }
+zen_auth = { path = "crates/zen_auth" }
+zen_crypto = { path = "crates/zen_crypto" }
+
+# Arrow ecosystem (single major version across the workspace)
+arrow = { version = "53", default-features = false, features = ["prettyprint", "ipc"] }
+arrow-array = "53"
+arrow-buffer = "53"
+arrow-schema = "53"
+arrow-ipc = "53"
+parquet = { version = "53", default-features = false, features = ["arrow", "snap", "zstd"] }
+
+# Search / index / vector
+tantivy = "0.22"
+roaring = "0.10"
+hnsw_rs = "0.3"
+
+# Compression
+zstd = "0.13"
+fsst-rs = "0.5"
+lz4_flex = "0.11"
+
+# Async runtime
+tokio = { version = "1.40", features = ["full"] }
+tokio-util = { version = "0.7", features = ["io"] }
+tokio-stream = "0.1"
+futures = "0.3"
+async-trait = "0.1"
+
+# Storage
+object_store = { version = "0.11", features = ["aws", "gcp", "azure"] }
+
+# Catalog (Postgres only; sqlite removed in favour of MockCatalog for tests)
+sqlx = { version = "0.8", default-features = false, features = ["postgres", "runtime-tokio", "tls-rustls-aws-lc-rs", "macros", "migrate", "chrono", "uuid"] }
+
+# Networking
+prost = "0.13"
+prost-types = "0.13"
+prost-build = "0.13"
+tonic = "0.12"
+tonic-build = "0.12"
+axum = { version = "0.7", features = ["macros"] }
+tower = { version = "0.5", features = ["full"] }
+tower-http = { version = "0.6", features = ["trace", "cors", "compression-zstd"] }
+hyper = { version = "1", features = ["full"] }
+reqwest = { version = "0.12", features = ["json", "stream"] }
+
+# Serde / parsers
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+simd-json = "0.14"
+toml = "0.8"
+sqlparser = "0.52"
+chumsky = "0.10"
+
+# Util
+thiserror = "1"
+anyhow = "1"
+bytes = "1"
+ulid = "1"
+uuid = { version = "1", features = ["v4", "v7", "serde"] }
+chrono = { version = "0.4", features = ["serde"] }
+xxhash-rust = { version = "0.8", features = ["xxh3"] }
+ahash = "0.8"
+rand = "0.8"
+rand_chacha = "0.3"
+rand_distr = "0.4"
+crc32fast = "1"
+
+# Allocator (used by binaries)
+mimalloc = { version = "0.1", default-features = false }
+
+# Caching
+moka = { version = "0.12", features = ["future", "sync"] }
+
+# Auth / crypto
+jsonwebtoken = "10"
+hmac = "0.12"
+sha2 = "0.10"
+base64 = "0.22"
+subtle = "2.6"
+
+# OpenAPI / SDK
+utoipa = { version = "5", features = ["axum_extras"] }
+
+# TLS
+axum-server = { version = "0.7", features = ["tls-rustls-no-provider"] }
+rustls = { version = "0.23", default-features = false, features = ["aws-lc-rs", "std"] }
+rustls-pemfile = "2"
+
+# Rate limiting / quotas
+governor = "0.7"
+dashmap = "6"
+
+# Encryption at rest (envelope: data key per segment, wrapped by KMS root)
+aes-gcm = "0.10"
+rand_core = { version = "0.6", features = ["std"] }
+
+# Observability
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt", "json"] }
+tracing-opentelemetry = "0.28"
+opentelemetry = "0.27"
+opentelemetry-otlp = { version = "0.27", features = ["grpc-tonic", "trace"] }
+opentelemetry_sdk = { version = "0.27", features = ["rt-tokio"] }
+prometheus = "0.14"
+metrics = "0.24"
+metrics-exporter-prometheus = { version = "0.16", default-features = false }
+
+# CLI
+clap = { version = "4", features = ["derive", "env"] }
+
+# Testing
+proptest = "1"
+criterion = { version = "0.5", features = ["html_reports", "async_tokio"] }
+tempfile = "3"
+
+# Statistics
+tdigest = "0.2"
+hyperloglog-rs = "0.1"
+
+# Zero-copy serialization (for hotcache + footers)
+rkyv = { version = "0.7", features = ["validation"] }
+bincode = "1.3"
+postcard = { version = "1", features = ["alloc"] }
+
+[profile.release]
+opt-level = 3
+lto = "fat"
+codegen-units = 1
+strip = "symbols"
+panic = "abort"
+debug = false
+overflow-checks = false
+
+[profile.bench]
+opt-level = 3
+lto = "thin"
+codegen-units = 1
+debug = false
+
+[profile.dev]
+opt-level = 1
+debug = 1
+incremental = true
+
+# Faster builds when running tests; keep some opt for sane bench numbers.
+[profile.test]
+opt-level = 1

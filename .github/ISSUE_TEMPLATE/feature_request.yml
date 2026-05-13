@@ -1,0 +1,58 @@
+name: Feature request
+description: Propose a new feature or enhancement.
+title: "feat: <short description>"
+labels: ["enhancement", "triage"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for the proposal. For larger changes (especially anything touching the
+        `zen_format`, `zen_compactor`, `zen_query`, `zen_fts`, or `zen_wal` crates),
+        please describe the design before writing code so we can align early.
+
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem
+      description: What user-visible problem does this solve? Skip the solution for a moment — describe the pain.
+    validations:
+      required: true
+
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposed solution
+      description: How would you address it? API surface, on-disk impact, query semantics — whatever applies.
+    validations:
+      required: true
+
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives considered
+      description: What else did you consider, and why did you reject it?
+
+  - type: textarea
+    id: impact
+    attributes:
+      label: Impact
+      description: Performance, compatibility, operations. Does this change the on-disk format or wire protocol?
+
+  - type: dropdown
+    id: scope
+    attributes:
+      label: Scope
+      options:
+        - small (one crate, hours of work)
+        - medium (a few crates, days of work)
+        - large (cross-cutting, weeks of work)
+
+  - type: checkboxes
+    id: checks
+    attributes:
+      label: Pre-flight
+      options:
+        - label: I searched existing issues and didn't find a duplicate.
+          required: true
+        - label: I'm willing to discuss the design before any implementation begins.
+          required: true

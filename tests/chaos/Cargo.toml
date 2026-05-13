@@ -1,0 +1,32 @@
+[package]
+name = "zen_chaos_tests"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[dependencies]
+zen_common = { path = "../../crates/zen_common" }
+zen_format = { path = "../../crates/zen_format" }
+zen_storage = { path = "../../crates/zen_storage" }
+zen_wal = { path = "../../crates/zen_wal" }
+zen_memtable = { path = "../../crates/zen_memtable" }
+zen_catalog = { path = "../../crates/zen_catalog" }
+zen_compactor = { path = "../../crates/zen_compactor" }
+chrono = "0.4"
+uuid = { version = "1", features = ["v4"] }
+tokio = { version = "1", features = ["full"] }
+tempfile = "3"
+bytes = "1"
+async-trait = "0.1"
+
+[[test]]
+name = "corrupt_segment"
+path = "corrupt_segment.rs"
+
+[[test]]
+name = "kill_writer"
+path = "kill_writer.rs"
+
+[[test]]
+name = "disk_full"
+path = "disk_full.rs"

@@ -1,0 +1,33 @@
+# Cargo build artifacts (anywhere in the tree).
+target/
+**/target/
+Cargo.lock.bak
+
+# Local data + caches
+/data
+*.db
+*.db-wal
+*.db-shm
+
+# Bench results — kept local only. The folder is no longer tracked
+# in git; older snapshots and comparison harnesses live on developer
+# machines, not in the repo.
+/bench-results/
+
+# Editor / OS noise
+.DS_Store
+*.swp
+.vscode/
+.idea/
+*.iml
+.env
+.env.local
+proptest-regressions/
+*.profraw
+
+# Compiled junk
+*.rlib
+*.rmeta
+*.o
+*.timestamp
+*.bin

@@ -1,0 +1,43 @@
+[package]
+name = "zen_bench"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "zen_direct_bench"
+path = "src/bin/direct_bench.rs"
+
+[dependencies]
+zen_common = { workspace = true }
+zen_query = { workspace = true }
+zen_ql = { workspace = true }
+zen_catalog = { workspace = true }
+zen_storage = { workspace = true }
+zen_format = { workspace = true }
+zen_compactor = { workspace = true }
+zen_index = { workspace = true }
+zen_memtable = { workspace = true }
+zen_wal = { workspace = true }
+arrow = { workspace = true }
+arrow-array = { workspace = true }
+arrow-schema = { workspace = true }
+arrow-ipc = { workspace = true }
+bytes = { workspace = true }
+reqwest = { workspace = true }
+tokio = { workspace = true }
+futures = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+tdigest = { workspace = true }
+rand = { workspace = true }
+rand_chacha = { workspace = true }
+rand_distr = { workspace = true }
+ulid = { workspace = true }
+uuid = { workspace = true }
+chrono = { workspace = true }
+clap = { workspace = true }
+tracing = { workspace = true }
+anyhow = { workspace = true }
+xxhash-rust = { workspace = true }

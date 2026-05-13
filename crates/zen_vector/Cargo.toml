@@ -1,0 +1,25 @@
+[package]
+name = "zen_vector"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+zen_common = { workspace = true }
+hnsw_rs = { workspace = true }
+roaring = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+bytes = { workspace = true }
+thiserror = { workspace = true }
+rand = { workspace = true }
+tempfile = { workspace = true }
+
+[dev-dependencies]
+criterion = { workspace = true }
+rand_chacha = { workspace = true }
+
+[[bench]]
+name = "vector_bench"
+harness = false

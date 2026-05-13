@@ -1,0 +1,33 @@
+# Multi-stage Dockerfile for ZenithDB.
+# Final image is gcr.io/distroless/cc-debian12:nonroot — runs as UID 65532
+# with no shell, no package manager, and a read-only-root-filesystem
+# friendly layout. Suitable for Kubernetes with `runAsNonRoot: true`.
+
+ARG RUST_VERSION=1.88
+FROM rust:${RUST_VERSION}-bookworm AS builder
+WORKDIR /src
+
+# Required for prost/tonic build.
+RUN apt-get update && apt-get install -y protobuf-compiler && rm -rf /var/lib/apt/lists/*
+
+# Copy workspace.
+COPY Cargo.toml Cargo.lock rust-toolchain.toml ./
+COPY .cargo/ .cargo/
+COPY proto/ proto/
+COPY crates/ crates/
+COPY examples/ examples/
+
+# Build with release profile.
+RUN cargo build --release --bin zenithdb --bin zen
+
+# Final stage: distroless `nonroot` variant runs as UID 65532 by default.
+FROM gcr.io/distroless/cc-debian12:nonroot
+COPY --from=builder --chown=65532:65532 /src/target/release/zenithdb /usr/local/bin/zenithdb
+COPY --from=builder --chown=65532:65532 /src/target/release/zen /usr/local/bin/zen
+COPY --chown=65532:65532 examples/zenithdb.dev.toml /etc/zenithdb/config.toml
+
+USER 65532:65532
+EXPOSE 8080 50051
+ENV ZEN_LOG=info
+
+ENTRYPOINT ["/usr/local/bin/zenithdb", "--config", "/etc/zenithdb/config.toml"]

@@ -1,0 +1,23 @@
+[package]
+name = "zen_compress"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+zen_common = { workspace = true }
+zstd = { workspace = true }
+fsst-rs = { workspace = true }
+lz4_flex = { workspace = true }
+bytes = { workspace = true }
+thiserror = { workspace = true }
+
+[dev-dependencies]
+proptest = { workspace = true }
+criterion = { workspace = true }
+rand = { workspace = true }
+
+[[bench]]
+name = "compress_bench"
+harness = false

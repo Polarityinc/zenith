@@ -1,0 +1,52 @@
+[package]
+name = "zen_query"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+zen_common = { workspace = true }
+zen_format = { workspace = true }
+zen_index = { workspace = true }
+zen_fts = { workspace = true }
+zen_jsonpath = { workspace = true }
+zen_vector = { workspace = true }
+zen_storage = { workspace = true }
+zen_wal = { workspace = true }
+zen_memtable = { workspace = true }
+zen_catalog = { workspace = true }
+arrow = { workspace = true }
+arrow-array = { workspace = true }
+arrow-schema = { workspace = true }
+roaring = { workspace = true }
+moka = { workspace = true }
+tokio = { workspace = true }
+async-trait = { workspace = true }
+futures = { workspace = true }
+tdigest = { workspace = true }
+xxhash-rust = { workspace = true }
+parking_lot = "0.12"
+ahash = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+tracing = { workspace = true }
+thiserror = { workspace = true }
+
+[dependencies.ulid]
+workspace = true
+
+[dev-dependencies]
+zen_compactor = { workspace = true }
+zen_memtable = { workspace = true }
+zen_wal = { workspace = true }
+chrono = { workspace = true }
+uuid = { workspace = true }
+criterion = { workspace = true }
+tempfile = { workspace = true }
+rand = { workspace = true }
+bytes = { workspace = true }
+
+[[bench]]
+name = "query_bench"
+harness = false

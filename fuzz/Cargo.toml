@@ -1,0 +1,43 @@
+[package]
+name = "zen-fuzz"
+version = "0.0.0"
+edition = "2021"
+publish = false
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4"
+zen_wal = { path = "../crates/zen_wal" }
+zen_format = { path = "../crates/zen_format" }
+zen_ql = { path = "../crates/zen_ql" }
+
+[[bin]]
+name = "fuzz_wal_parse"
+path = "fuzz_targets/fuzz_wal_parse.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "fuzz_segment_parse"
+path = "fuzz_targets/fuzz_segment_parse.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "fuzz_zenithql_parse"
+path = "fuzz_targets/fuzz_zenithql_parse.rs"
+test = false
+doc = false
+bench = false
+
+# Don't pull this into the workspace — `cargo-fuzz` requires nightly Rust
+# for libfuzzer instrumentation. Operators run it out-of-band:
+#
+#   cargo +nightly fuzz run fuzz_wal_parse -- -max_total_time=300
+#
+# CI is intentionally not wired to this so PRs can pass on stable.
+[workspace]

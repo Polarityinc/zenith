@@ -1,0 +1,33 @@
+[package]
+name = "zen_wal"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+zen_common = { workspace = true }
+zen_compress = { workspace = true }
+zen_storage = { workspace = true }
+arrow = { workspace = true }
+arrow-array = { workspace = true }
+arrow-schema = { workspace = true }
+arrow-ipc = { workspace = true }
+zstd = { workspace = true }
+lz4_flex = { workspace = true }
+crc32fast = { workspace = true }
+ulid = { workspace = true }
+bytes = { workspace = true }
+tokio = { workspace = true }
+async-trait = { workspace = true }
+tracing = { workspace = true }
+thiserror = { workspace = true }
+
+[dev-dependencies]
+criterion = { workspace = true }
+tempfile = { workspace = true }
+proptest = { workspace = true }
+
+[[bench]]
+name = "wal_bench"
+harness = false

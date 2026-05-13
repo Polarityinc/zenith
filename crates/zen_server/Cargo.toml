@@ -1,0 +1,62 @@
+[package]
+name = "zen_server"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+zen_common = { workspace = true }
+zen_proto = { workspace = true }
+zen_query = { workspace = true }
+zen_ql = { workspace = true }
+zen_memtable = { workspace = true }
+zen_storage = { workspace = true }
+zen_wal = { workspace = true }
+zen_catalog = { workspace = true }
+zen_compactor = { workspace = true }
+zen_cluster = { workspace = true }
+zen_auth = { workspace = true }
+zen_format = { workspace = true }
+arrow = { workspace = true }
+arrow-array = { workspace = true }
+arrow-schema = { workspace = true }
+arrow-ipc = { workspace = true }
+axum = { workspace = true }
+axum-server = { workspace = true }
+rustls = { workspace = true }
+rustls-pemfile = { workspace = true }
+tower = { workspace = true }
+tower-http = { workspace = true }
+governor = { workspace = true }
+dashmap = { workspace = true }
+http-body-util = "0.1"
+tonic = { workspace = true }
+hyper = { workspace = true }
+tokio = { workspace = true }
+async-trait = { workspace = true }
+futures = { workspace = true }
+tokio-stream = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+simd-json = { workspace = true }
+prost = { workspace = true }
+bytes = { workspace = true }
+ulid = { workspace = true }
+uuid = { workspace = true }
+chrono = { workspace = true }
+parking_lot = "0.12"
+xxhash-rust = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+prometheus = { workspace = true }
+metrics = { workspace = true }
+metrics-exporter-prometheus = { workspace = true }
+utoipa = { workspace = true }
+mimalloc = { workspace = true }
+thiserror = { workspace = true }
+anyhow = { workspace = true }
+
+[dev-dependencies]
+reqwest = { workspace = true }
+tempfile = { workspace = true }

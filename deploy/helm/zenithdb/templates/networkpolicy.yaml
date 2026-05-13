@@ -1,0 +1,52 @@
+{{- if .Values.networkPolicy.enabled }}
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ .Release.Name }}
+  labels:
+    app.kubernetes.io/name: zenithdb
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: zenithdb
+  policyTypes:
+    - Ingress
+    - Egress
+  ingress:
+    # Allow scrape from Prometheus / monitoring namespace.
+    {{- with .Values.networkPolicy.allowFromNamespaces }}
+    - from:
+        {{- range . }}
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: {{ . }}
+        {{- end }}
+      ports:
+        - port: 8080
+        - port: 50051
+    {{- end }}
+    # Allow inter-node traffic (peer cluster nodes hit /v1/internal/query).
+    - from:
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/name: zenithdb
+      ports:
+        - port: 8080
+        - port: 50051
+  egress:
+    # Default-deny except: DNS, catalog (postgres), object store, IdP JWKS.
+    - to:
+        - namespaceSelector: {}
+      ports:
+        - port: 53
+          protocol: UDP
+        - port: 53
+          protocol: TCP
+    {{- with .Values.networkPolicy.allowEgressCidrs }}
+    - to:
+        {{- range . }}
+        - ipBlock:
+            cidr: {{ . }}
+        {{- end }}
+    {{- end }}
+{{- end }}

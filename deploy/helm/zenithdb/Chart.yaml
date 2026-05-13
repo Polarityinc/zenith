@@ -1,0 +1,9 @@
+apiVersion: v2
+name: zenithdb
+description: ZenithDB — AI-agent-trace database
+type: application
+version: 0.1.0
+appVersion: "0.1.0"
+maintainers:
+  - name: Polarity
+    email: support@polarity.so

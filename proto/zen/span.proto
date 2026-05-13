@@ -1,0 +1,44 @@
+syntax = "proto3";
+package zen.v1;
+
+message SpanIngestRequest {
+  uint64 tenant_id = 1;
+  uint32 partition_id = 2;
+  bytes trace_id = 3;          // 16 bytes
+  bytes span_id = 4;           // 16 bytes
+  bytes parent_span_id = 5;    // 16 bytes, may be empty
+  int64 start_time_ms = 6;
+  int64 end_time_ms = 7;
+  int64 duration_ms = 8;
+  string span_type = 9;
+  string status = 10;
+  string provider = 11;
+  string model = 12;
+  string tool_name = 13;
+  string prompt = 14;
+  string completion = 15;
+  uint32 prompt_tokens = 16;
+  uint32 completion_tokens = 17;
+  double cost_usd = 18;
+  double temperature = 19;
+  double top_p = 20;
+  string tool_io_text = 21;
+  string user_id = 22;
+  string session_id = 23;
+  string request_id = 24;
+  bytes metadata_json = 25;
+  repeated float embedding = 26;
+}
+
+message IngestRequest {
+  repeated SpanIngestRequest spans = 1;
+}
+
+message IngestResponse {
+  uint64 spans_accepted = 1;
+  string wal_object_key = 2;
+}
+
+service IngestService {
+  rpc Ingest(IngestRequest) returns (IngestResponse);
+}
