@@ -3,7 +3,10 @@
 All notable changes to ZenithDB. Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 versioning: [SemVer](https://semver.org/).
 
-## [Unreleased]
+## [0.0.1] — 2026-05-13
+
+First tagged release. Bundles everything below — engine, perf work,
+open-source prep, and CI hardening — under `v0.0.1`.
 
 ### Open source prep (2026-05-12)
 
@@ -117,9 +120,9 @@ manually before upgrading.
 
 - 83 → 0 clippy warnings; CI now enforces `-D warnings`.
 
-## [0.1.0] — 2026-05-04
+### Pre-tag initial build (2026-05-04)
 
-Initial build:
+Initial build (rolled into v0.0.1):
 
 - 18-crate Rust workspace (~13 K LOC).
 - PAX columnar segments with FSST + ZSTD + Gorilla XOR + FoR + RLE + dict.
