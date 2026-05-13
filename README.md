@@ -18,7 +18,6 @@
 
 <p align="center">
   <a href="#quickstart">Quickstart</a> ·
-  <a href="#features">Features</a> ·
   <a href="#architecture">Architecture</a> ·
   <a href="docs/RUNBOOK.md">Runbook</a> ·
   <a href="CONTRIBUTING.md">Contributing</a> ·
@@ -41,19 +40,6 @@ Existing observability backends are built for short, structured spans and pay a 
 
 Everything else is supporting infrastructure.
 
-## Features
-
-- **Ingest** — HTTP (`POST /v1/ingest`), gRPC, OTLP traces, with simd-json body parsing.
-- **Query** — SQL (sqlparser) and **ZenithQL**, the agent-trace native query language.
-- **Full-text search** — Tantivy embedded directly in segments, no sidecar index.
-- **Vector search** — HNSW + optional quantization, OpenAI/Anthropic embedding sizes out of the box.
-- **JSON-path indexing** — bitmap posting lists over the hottest paths, sampled per segment.
-- **Compression** — FSST + ZSTD on strings, Gorilla XOR on floats, FoR/RLE on integers, dictionary on low-card columns.
-- **Storage backends** — local FS, S3, GCS, Azure Blob; PostgreSQL catalog (with `MockCatalog` in-memory backend for tests).
-- **Ops, day one** — JWT auth, TLS termination (rustls + aws-lc-rs), Prometheus metrics, OTLP tracing, per-tenant rate limits, graceful shutdown, snapshot/restore CLI.
-- **Encryption at rest** — AES-256-GCM envelope encryption, pluggable KMS root key.
-- **Cluster** — rendezvous-hash sharded, transparent query routing, 3-node integration test in CI.
-
 ## Quickstart
 
 ### Install (30-second start)
@@ -75,8 +61,6 @@ Then start a local server in seconds (in-memory catalog + local-FS object store,
 zen serve --config examples/zenithdb.dev.toml
 # HTTP :8080  |  gRPC :50051  |  data under ./data/
 ```
-
-> **30-second rule:** from `curl | sh` to `POST /v1/ingest` returning `200 OK` should take well under 30 seconds on a modern laptop. If it doesn't, [open an issue](https://github.com/Polarityinc/zenith/issues).
 
 ### Build from source
 
@@ -116,37 +100,11 @@ curl -s 'localhost:8080/v1/query' -H 'content-type: application/json' -d '{
 }'
 ```
 
-### Run with Docker
-
-```bash
-docker run --rm -p 8080:8080 -p 50051:50051 \
-  -v $(pwd)/data:/var/lib/zenith \
-  ghcr.io/Polarityinc/zenith:latest
-```
-
 ### Production-like local stack (Postgres + MinIO)
 
 ```bash
 docker compose -f deploy/docker/docker-compose.dev.yml up -d
 ZEN_PROFILE=prod-like cargo run --release -p zen_cli -- serve
-```
-
-### Benchmark
-
-```bash
-# Generate a 4M-span synthetic corpus and load it.
-cargo run --release -p zen_cli -- bench gen --rows 4000000 --output /tmp/corpus.bin
-cargo run --release -p zen_cli -- bench load --input /tmp/corpus.bin --target http://localhost:8080
-
-# Run the benchmark suite.
-cargo run --release -p zen_cli -- bench run --suite all --warmup 30s --duration 60s \
-  --output bench-results/$(date +%Y%m%d-%H%M%S).json
-```
-
-For the **1-billion-row** reference benchmark — chunked corpus generation, periodic compaction, and the standard query suite at the end — see [`benchmarks/`](benchmarks/) and run:
-
-```bash
-./benchmarks/bench_1b.sh
 ```
 
 ## Architecture
@@ -183,24 +141,6 @@ The workspace is 18 Rust crates under [`crates/`](crates). The five "moat" crate
 
 The remaining crates (`zen_storage`, `zen_memtable`, `zen_catalog`, `zen_index`, `zen_jsonpath`, `zen_vector`, `zen_compress`, `zen_server`, `zen_cli`, `zen_cluster`, `zen_auth`, `zen_crypto`, `zen_proto`, `zen_ql`, `zen_bench`, `zen_common`) are supporting infrastructure.
 
-## Production-readiness
-
-ZenithDB ships with the operational primitives needed to run on real infrastructure. See [`docs/RUNBOOK.md`](docs/RUNBOOK.md) for the operator's guide and [`docs/SCALING_1TB_1PB.md`](docs/SCALING_1TB_1PB.md) for sizing notes.
-
-| Concern             | What you get |
-|---------------------|--------------|
-| **Auth**            | JWT (RS256 + JWKS) on customer routes; HMAC-SHA256 on inter-node `/v1/internal/*`. |
-| **TLS**             | Optional `rustls` + `aws-lc-rs` termination, or run behind a TLS-terminating LB. |
-| **Metrics**         | `/v1/metrics` Prometheus endpoint with histograms + counters. |
-| **Tracing**         | OTLP exporter wired from `telemetry.otlp_endpoint`. |
-| **Rate limiting**   | Per-tenant token bucket (default 100 QPS / 1000 burst); global concurrency cap (256). |
-| **Health**          | Split `/v1/healthz` (liveness) and `/v1/readyz` (readiness, catalog-aware). |
-| **Durability**      | WAL fsync on by default; `ZEN_UNSAFE_FAST=1` for reproducible-data scenarios only. |
-| **Encryption**      | AES-256-GCM envelope encryption per segment; static or KMS root key. |
-| **Backup/restore**  | `zen admin-backup` / `zen admin-restore` serialize a tenant's segments + manifest. |
-| **Cluster**         | Rendezvous-hash sharded, transparent query routing, 3-node CI test. |
-| **Deploy**          | Helm chart with PDB/HPA/NetworkPolicy/IRSA, Terraform with KMS + multi-AZ RDS. |
-
 ## Configuration
 
 The default profile runs entirely on your laptop with no external services:
@@ -230,7 +170,6 @@ Configure the upstream via `ZENITH_URL` (default `http://localhost:8080`).
 
 - **[Architecture](docs/ARCHITECTURE.md)** — deep dive on the five moat crates and the design choices.
 - **[Runbook](docs/RUNBOOK.md)** — operator's guide.
-- **[Scaling 1 TB → 1 PB](docs/SCALING_1TB_1PB.md)** — sizing & topology notes.
 - **[Examples](examples)** — `zenithdb.dev.toml` config + Python and TypeScript quickstarts.
 - **[Changelog](CHANGELOG.md)** — what landed when.
 - **[Contributing](CONTRIBUTING.md)** — dev setup, conventions, PR workflow.
