@@ -22,7 +22,9 @@ use zen_catalog::{model::*, Catalog, PostgresCatalog};
 use zen_common::{CommitId, PartitionId, SchemaFingerprint, TenantId, TraceId};
 
 fn pg_url() -> Option<String> {
-    std::env::var("ZEN_PG_TEST_URL").ok().filter(|s| !s.is_empty())
+    std::env::var("ZEN_PG_TEST_URL")
+        .ok()
+        .filter(|s| !s.is_empty())
 }
 
 fn seg_row(tenant: u64, partition: u32, time_min: i64, time_max: i64) -> SegmentRow {
@@ -68,7 +70,11 @@ async fn postgres_catalog_full_contract() {
     // Open + apply migrations once. Concrete handle for the truncate
     // helper; trait object for the actual sub-tests.
     let pg = PostgresCatalog::open(&url).await.expect("open postgres");
-    let cat: Arc<dyn Catalog> = Arc::new(PostgresCatalog::open(&url).await.expect("open postgres again"));
+    let cat: Arc<dyn Catalog> = Arc::new(
+        PostgresCatalog::open(&url)
+            .await
+            .expect("open postgres again"),
+    );
 
     // Re-open should be a no-op (migrations idempotent).
     {

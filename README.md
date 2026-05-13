@@ -1,5 +1,5 @@
 <p align="center">
-  <a href="https://zenith.dev">
+  <a href="https://zenith.polarity.so">
     <img src=".github/assets/zenith.png" alt="ZenithDB" width="100%" />
   </a>
 </p>
@@ -56,16 +56,38 @@ Everything else is supporting infrastructure.
 
 ## Quickstart
 
-### Prerequisites
+### Install (30-second start)
+
+One line on macOS or Linux — the installer detects your OS + arch and drops the `zen` binary in `~/.local/bin`:
+
+```bash
+# macOS (Apple Silicon or Intel) and Linux (arm64 or amd64)
+curl -fsSL https://raw.githubusercontent.com/Polarityinc/zenith/main/install.sh | sh
+
+# pin a version, or change the install dir
+curl -fsSL https://raw.githubusercontent.com/Polarityinc/zenith/main/install.sh \
+  | VERSION=v0.1.0 INSTALL_DIR=/usr/local/bin sh
+```
+
+Then start a local server in seconds (in-memory catalog + local-FS object store, no Docker, no Postgres):
+
+```bash
+zen serve --config examples/zenithdb.dev.toml
+# HTTP :8080  |  gRPC :50051  |  data under ./data/
+```
+
+> **30-second rule:** from `curl | sh` to `POST /v1/ingest` returning `200 OK` should take well under 30 seconds on a modern laptop. If it doesn't, [open an issue](https://github.com/Polarityinc/zenith/issues).
+
+### Build from source
+
+If you'd rather build it yourself (or `install.sh` has no release for your platform yet):
 
 - Rust **1.87+** (stable)
 - `protoc` 3.21+ (`brew install protobuf` on macOS, `apt-get install protobuf-compiler` on Debian/Ubuntu)
 
-### Run a server (zero config)
-
 ```bash
 git clone https://github.com/Polarityinc/zenith.git
-cd zenithdb
+cd zenith
 cargo build --release
 
 # Default profile: in-memory `MockCatalog` + local-FS object store. No Docker required.
@@ -119,6 +141,12 @@ cargo run --release -p zen_cli -- bench load --input /tmp/corpus.bin --target ht
 # Run the benchmark suite.
 cargo run --release -p zen_cli -- bench run --suite all --warmup 30s --duration 60s \
   --output bench-results/$(date +%Y%m%d-%H%M%S).json
+```
+
+For the **1-billion-row** reference benchmark — chunked corpus generation, periodic compaction, and the standard query suite at the end — see [`benchmarks/`](benchmarks/) and run:
+
+```bash
+./benchmarks/bench_1b.sh
 ```
 
 ## Architecture
@@ -183,10 +211,27 @@ The default profile runs entirely on your laptop with no external services:
 
 See [`examples/zenithdb.dev.toml`](examples/zenithdb.dev.toml) for the full config surface, and [`docs/RUNBOOK.md`](docs/RUNBOOK.md) for production tuning.
 
+## Console (web dashboard)
+
+ZenithDB ships with a minimal Next.js console under [`web/`](web) that
+talks to the engine's HTTP API. It exposes live segments, queries,
+compactions, WAL metrics, and a query runner — no fixtures, all real
+data.
+
+```bash
+cd web
+bun install
+bun dev   # http://localhost:3000
+```
+
+Configure the upstream via `ZENITH_URL` (default `http://localhost:8080`).
+
 ## Documentation
 
+- **[Architecture](docs/ARCHITECTURE.md)** — deep dive on the five moat crates and the design choices.
 - **[Runbook](docs/RUNBOOK.md)** — operator's guide.
 - **[Scaling 1 TB → 1 PB](docs/SCALING_1TB_1PB.md)** — sizing & topology notes.
+- **[Examples](examples)** — `zenithdb.dev.toml` config + Python and TypeScript quickstarts.
 - **[Changelog](CHANGELOG.md)** — what landed when.
 - **[Contributing](CONTRIBUTING.md)** — dev setup, conventions, PR workflow.
 - **[Security](SECURITY.md)** — vulnerability disclosure.

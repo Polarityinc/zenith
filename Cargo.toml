@@ -34,7 +34,7 @@ rust-version = "1.87"
 authors = ["Polarity <support@polarity.so>"]
 license = "Apache-2.0"
 repository = "https://github.com/Polarityinc/zenith"
-homepage = "https://zenith.dev"
+homepage = "https://zenith.polarity.so"
 
 [workspace.dependencies]
 # Internal crates
@@ -160,7 +160,7 @@ tracing-opentelemetry = "0.28"
 opentelemetry = "0.27"
 opentelemetry-otlp = { version = "0.27", features = ["grpc-tonic", "trace"] }
 opentelemetry_sdk = { version = "0.27", features = ["rt-tokio"] }
-prometheus = "0.13"
+prometheus = "0.14"
 metrics = "0.24"
 metrics-exporter-prometheus = { version = "0.16", default-features = false }
 

@@ -375,12 +375,8 @@ mod tests {
         let res = build_fts_index(&acc, &opts).expect("build");
         // Manifest length is the first u32 LE.
         assert!(res.blob.len() > 4);
-        let manifest_len = u32::from_le_bytes([
-            res.blob[0],
-            res.blob[1],
-            res.blob[2],
-            res.blob[3],
-        ]) as usize;
+        let manifest_len =
+            u32::from_le_bytes([res.blob[0], res.blob[1], res.blob[2], res.blob[3]]) as usize;
         assert!(manifest_len > 0);
         assert!(4 + manifest_len <= res.blob.len(), "manifest must fit");
 

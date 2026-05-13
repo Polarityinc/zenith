@@ -5,7 +5,24 @@ versioning: [SemVer](https://semver.org/).
 
 ## [Unreleased]
 
-### Catalog: Postgres-only (2026-05-08)
+### Open source prep (2026-05-12)
+
+#### Added
+
+- `docs/ARCHITECTURE.md` — engine-internal deep dive covering the five
+  moat crates, request flow, and the design choices behind PAX
+  segments, trace-locality compaction, late materialization,
+  Tantivy-inline FTS, and object-store WAL.
+- `examples/python_quickstart.py` and `examples/typescript_quickstart.ts`
+  — minimal ingest + query against `/v1/ingest` + `/v1/query`.
+- README callout for the Next.js console under `web/`.
+- Guardrail comment in `.github/CODEOWNERS` flagging that the
+  referenced GitHub teams must exist or be swapped for individual
+  handles.
+
+#### Changed
+
+- `homepage` (Cargo.toml + README) now points at `zenith.polarity.so`.
 
 #### Removed
 

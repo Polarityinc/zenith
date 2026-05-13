@@ -187,8 +187,7 @@ mod tests {
         assert!(hits[0].distance < 1e-3);
 
         // Recall@10 against this same query should include row 73.
-        let recalled: std::collections::HashSet<u32> =
-            hits.iter().map(|h| h.row_idx).collect();
+        let recalled: std::collections::HashSet<u32> = hits.iter().map(|h| h.row_idx).collect();
         assert!(recalled.contains(&73));
     }
 
