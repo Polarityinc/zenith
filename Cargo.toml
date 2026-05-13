@@ -131,7 +131,7 @@ mimalloc = { version = "0.1", default-features = false }
 moka = { version = "0.12", features = ["future", "sync"] }
 
 # Auth / crypto
-jsonwebtoken = "9"
+jsonwebtoken = "10"
 hmac = "0.12"
 sha2 = "0.10"
 base64 = "0.22"
