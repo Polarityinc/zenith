@@ -19,7 +19,7 @@ zen_bench = { path = "../../crates/zen_bench" }
 zen_cluster = { path = "../../crates/zen_cluster" }
 zen_auth = { path = "../../crates/zen_auth" }
 tokio = { version = "1", features = ["full"] }
-jsonwebtoken = "9"
+jsonwebtoken = { workspace = true }
 bytes = "1"
 rand_core = { version = "0.6", features = ["std"] }
 chrono = { version = "0.4", features = ["serde"] }

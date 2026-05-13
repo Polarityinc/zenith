@@ -2110,21 +2110,6 @@ dependencies = [
 
 [[package]]
 name = "jsonwebtoken"
-version = "9.3.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "5a87cc7a48537badeae96744432de36f4be2b4a34a05a5ef32e9dd8a1c169dde"
-dependencies = [
- "base64",
- "js-sys",
- "pem",
- "ring",
- "serde",
- "serde_json",
- "simple_asn1",
-]
-
-[[package]]
-name = "jsonwebtoken"
 version = "10.4.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "eba32bfb4ffdeaca3e34431072faf01745c9b26d25504aa7a6cf5684334fc4fc"
@@ -5832,14 +5817,14 @@ dependencies = [
 
 [[package]]
 name = "zen_auth"
-version = "0.1.0"
+version = "0.0.1"
 dependencies = [
  "async-trait",
  "base64",
  "chrono",
  "futures",
  "hmac",
- "jsonwebtoken 10.4.0",
+ "jsonwebtoken",
  "moka",
  "parking_lot",
  "rand_core 0.6.4",
@@ -5858,7 +5843,7 @@ dependencies = [
 
 [[package]]
 name = "zen_bench"
-version = "0.1.0"
+version = "0.0.1"
 dependencies = [
  "anyhow",
  "arrow",
@@ -5895,7 +5880,7 @@ dependencies = [
 
 [[package]]
 name = "zen_catalog"
-version = "0.1.0"
+version = "0.0.1"
 dependencies = [
  "async-trait",
  "bytes",
@@ -5936,7 +5921,7 @@ dependencies = [
 
 [[package]]
 name = "zen_cli"
-version = "0.1.0"
+version = "0.0.1"
 dependencies = [
  "anyhow",
  "arrow-array",
@@ -5969,7 +5954,7 @@ dependencies = [
 
 [[package]]
 name = "zen_cluster"
-version = "0.1.0"
+version = "0.0.1"
 dependencies = [
  "ahash",
  "arrow",
@@ -6002,7 +5987,7 @@ dependencies = [
 
 [[package]]
 name = "zen_common"
-version = "0.1.0"
+version = "0.0.1"
 dependencies = [
  "arrow-schema",
  "bytes",
@@ -6022,7 +6007,7 @@ dependencies = [
 
 [[package]]
 name = "zen_compactor"
-version = "0.1.0"
+version = "0.0.1"
 dependencies = [
  "arrow",
  "arrow-array",
@@ -6053,7 +6038,7 @@ dependencies = [
 
 [[package]]
 name = "zen_compress"
-version = "0.1.0"
+version = "0.0.1"
 dependencies = [
  "bytes",
  "criterion",
@@ -6068,7 +6053,7 @@ dependencies = [
 
 [[package]]
 name = "zen_crypto"
-version = "0.1.0"
+version = "0.0.1"
 dependencies = [
  "aes-gcm",
  "hex",
@@ -6081,7 +6066,7 @@ dependencies = [
 
 [[package]]
 name = "zen_format"
-version = "0.1.0"
+version = "0.0.1"
 dependencies = [
  "arrow",
  "arrow-array",
@@ -6109,7 +6094,7 @@ dependencies = [
 
 [[package]]
 name = "zen_fts"
-version = "0.1.0"
+version = "0.0.1"
 dependencies = [
  "bytes",
  "criterion",
@@ -6127,7 +6112,7 @@ dependencies = [
 
 [[package]]
 name = "zen_index"
-version = "0.1.0"
+version = "0.0.1"
 dependencies = [
  "ahash",
  "bytes",
@@ -6149,7 +6134,7 @@ dependencies = [
  "axum",
  "bytes",
  "chrono",
- "jsonwebtoken 9.3.1",
+ "jsonwebtoken",
  "rand_core 0.6.4",
  "reqwest",
  "serde",
@@ -6175,7 +6160,7 @@ dependencies = [
 
 [[package]]
 name = "zen_jsonpath"
-version = "0.1.0"
+version = "0.0.1"
 dependencies = [
  "ahash",
  "bytes",
@@ -6194,7 +6179,7 @@ dependencies = [
 
 [[package]]
 name = "zen_memtable"
-version = "0.1.0"
+version = "0.0.1"
 dependencies = [
  "arrow",
  "arrow-array",
@@ -6226,7 +6211,7 @@ dependencies = [
 
 [[package]]
 name = "zen_proto"
-version = "0.1.0"
+version = "0.0.1"
 dependencies = [
  "bytes",
  "prost",
@@ -6239,7 +6224,7 @@ dependencies = [
 
 [[package]]
 name = "zen_ql"
-version = "0.1.0"
+version = "0.0.1"
 dependencies = [
  "criterion",
  "proptest",
@@ -6252,7 +6237,7 @@ dependencies = [
 
 [[package]]
 name = "zen_query"
-version = "0.1.0"
+version = "0.0.1"
 dependencies = [
  "ahash",
  "arrow",
@@ -6292,7 +6277,7 @@ dependencies = [
 
 [[package]]
 name = "zen_server"
-version = "0.1.0"
+version = "0.0.1"
 dependencies = [
  "anyhow",
  "arrow",
@@ -6350,7 +6335,7 @@ dependencies = [
 
 [[package]]
 name = "zen_storage"
-version = "0.1.0"
+version = "0.0.1"
 dependencies = [
  "async-trait",
  "bytes",
@@ -6371,7 +6356,7 @@ dependencies = [
 
 [[package]]
 name = "zen_vector"
-version = "0.1.0"
+version = "0.0.1"
 dependencies = [
  "bytes",
  "criterion",
@@ -6388,7 +6373,7 @@ dependencies = [
 
 [[package]]
 name = "zen_wal"
-version = "0.1.0"
+version = "0.0.1"
 dependencies = [
  "arrow",
  "arrow-array",
